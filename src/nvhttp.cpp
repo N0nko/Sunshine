@@ -29,6 +29,9 @@
 #include "network.h"
 #include "nvhttp.h"
 #include "platform/common.h"
+#ifdef _WIN32
+  #include "platform/windows/vulkan_hdr_state.h"
+#endif
 #include "process.h"
 #include "rtsp.h"
 #include "system_tray.h"
@@ -1090,6 +1093,14 @@ namespace nvhttp {
       return;
     }
 
+#ifdef _WIN32
+    const auto vulkan_hdr_launch_id = launch_session->id;
+    auto vulkan_hdr_pending_guard = util::fail_guard([vulkan_hdr_launch_id]() {
+      platf::vulkan_hdr::clear_pending(vulkan_hdr_launch_id);
+    });
+    platf::vulkan_hdr::set_pending(vulkan_hdr_launch_id, launch_session->enable_hdr);
+#endif
+
     if (appid > 0) {
       auto err = proc::proc.execute((int) appid, launch_session);
       if (err) {
@@ -1120,6 +1131,9 @@ namespace nvhttp {
     );
     tree.put("root.gamesession", 1);
     warm_resume_cache.remember(make_warm_resume_fingerprint(*launch_session));
+#ifdef _WIN32
+    vulkan_hdr_pending_guard.disable();
+#endif
 
     // Stream was started successfully, we will revert the config when the app or session terminates
     revert_display_configuration = false;
@@ -1231,6 +1245,14 @@ namespace nvhttp {
       return;
     }
 
+#ifdef _WIN32
+    const auto vulkan_hdr_launch_id = launch_session->id;
+    auto vulkan_hdr_pending_guard = util::fail_guard([vulkan_hdr_launch_id]() {
+      platf::vulkan_hdr::clear_pending(vulkan_hdr_launch_id);
+    });
+    platf::vulkan_hdr::set_pending(vulkan_hdr_launch_id, launch_session->enable_hdr);
+#endif
+
     if (!rtsp_stream::launch_session_raise(launch_session, reconnect_requested)) {
       tree.put("root.resume", 0);
       tree.put("root.fastresume", 0);
@@ -1252,6 +1274,9 @@ namespace nvhttp {
     tree.put("root.resume", 1);
     tree.put("root.fastresume", fast_resume_accepted ? 1 : 0);
     warm_resume_cache.remember(make_warm_resume_fingerprint(*launch_session));
+#ifdef _WIN32
+    vulkan_hdr_pending_guard.disable();
+#endif
   }
 
   /**
@@ -1276,6 +1301,9 @@ namespace nvhttp {
     tree.put("root.<xmlattr>.status_code", 200);
 
     warm_resume_cache.clear();
+#ifdef _WIN32
+    platf::vulkan_hdr::clear();
+#endif
     rtsp_stream::terminate_sessions();
 
     if (proc::proc.running() > 0) {

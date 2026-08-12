@@ -71,6 +71,8 @@ set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/publish.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/deck_microphone.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/deck_microphone.h"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vulkan_hdr_state.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/vulkan_hdr_state.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/input.cpp"

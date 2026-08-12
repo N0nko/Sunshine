@@ -16,6 +16,7 @@ extern "C" {
 #include <set>
 #include <unordered_map>
 #include <utility>
+#include <vector>
 
 // lib includes
 #include <boost/asio.hpp>
@@ -27,6 +28,9 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#ifdef _WIN32
+  #include "platform/windows/vulkan_hdr_state.h"
+#endif
 #include "rtsp.h"
 #include "stream.h"
 #include "sync.h"
@@ -608,6 +612,11 @@ namespace rtsp_stream {
 
         raised_timer.cancel();
         const auto discarded = launch_event.pop(0s);
+#ifdef _WIN32
+        if (discarded) {
+          platf::vulkan_hdr::clear_pending(discarded->id);
+        }
+#endif
         BOOST_LOG(debug) << "Replacing unclaimed RTSP request for the same paired client: "sv
                          << (discarded ? discarded->id : 0) << " -> "sv << launch_session->id;
       }
@@ -621,6 +630,9 @@ namespace rtsp_stream {
         if (!ec) {
           auto discarded = launch_event.pop(0s);
           if (discarded) {
+#ifdef _WIN32
+            platf::vulkan_hdr::clear_pending(discarded->id);
+#endif
             BOOST_LOG(debug) << "Event timeout: "sv << discarded->unique_id;
           }
         }
@@ -642,7 +654,12 @@ namespace rtsp_stream {
           BOOST_LOG(error) << "Attempted to clear unexpected session: "sv << launch_session_id << " vs "sv << launch_session->id;
         } else {
           raised_timer.cancel();
-          launch_event.pop();
+          const auto discarded = launch_event.pop();
+#ifdef _WIN32
+          if (discarded) {
+            platf::vulkan_hdr::clear_pending(discarded->id);
+          }
+#endif
         }
       }
     }
@@ -666,19 +683,37 @@ namespace rtsp_stream {
      * @examples_end
      */
     void clear(bool all = true) {
-      auto lg = _session_slots.lock();
+#ifdef _WIN32
+      std::vector<const stream::session_t *> removed_sessions;
+#endif
+      {
+        auto lg = _session_slots.lock();
 
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          auto &slot = *(*i);
+          if (all || stream::session::state(slot) == stream::session::state_e::STOPPING) {
+            stream::session::stop(slot);
+            stream::session::join(slot);
 
-          i = _session_slots->erase(i);
-        } else {
-          i++;
+#ifdef _WIN32
+            removed_sessions.emplace_back(i->get());
+#endif
+            i = _session_slots->erase(i);
+          } else {
+            i++;
+          }
         }
       }
+
+#ifdef _WIN32
+      if (all) {
+        platf::vulkan_hdr::clear();
+      } else {
+        for (const auto *session : removed_sessions) {
+          platf::vulkan_hdr::session_stopped(session);
+        }
+      }
+#endif
     }
 
     /**
@@ -687,17 +722,31 @@ namespace rtsp_stream {
      * @param cert Certificate data or object used by the operation.
      */
     void clear_by_cert(std::string_view cert) {
-      auto lg = _session_slots.lock();
-      for (auto i = _session_slots->begin(); i != _session_slots->end();) {
-        auto &slot = *(*i);
-        if (stream::session::client_cert(slot) == cert) {
-          stream::session::stop(slot);
-          stream::session::join(slot);
-          i = _session_slots->erase(i);
-        } else {
-          i++;
+#ifdef _WIN32
+      std::vector<const stream::session_t *> removed_sessions;
+#endif
+      {
+        auto lg = _session_slots.lock();
+        for (auto i = _session_slots->begin(); i != _session_slots->end();) {
+          auto &slot = *(*i);
+          if (stream::session::client_cert(slot) == cert) {
+            stream::session::stop(slot);
+            stream::session::join(slot);
+#ifdef _WIN32
+            removed_sessions.emplace_back(i->get());
+#endif
+            i = _session_slots->erase(i);
+          } else {
+            i++;
+          }
         }
       }
+
+#ifdef _WIN32
+      for (const auto *session : removed_sessions) {
+        platf::vulkan_hdr::session_stopped(session);
+      }
+#endif
     }
 
     /**
@@ -705,18 +754,41 @@ namespace rtsp_stream {
      * @param session The session to remove.
      */
     void remove(const std::shared_ptr<stream::session_t> &session) {
-      auto lg = _session_slots.lock();
-      _session_slots->erase(session);
+      {
+        auto lg = _session_slots.lock();
+        _session_slots->erase(session);
+      }
+#ifdef _WIN32
+      platf::vulkan_hdr::session_stopped(session.get());
+#endif
     }
 
     /**
      * @brief Inserts the provided session into the set of sessions.
      * @param session The session to insert.
+     * @param launch_session_id Pending RTSP launch identifier.
+     * @param hdr_enabled Whether this session requested HDR.
      */
-    void insert(const std::shared_ptr<stream::session_t> &session) {
-      auto lg = _session_slots.lock();
-      _session_slots->emplace(session);
-      BOOST_LOG(info) << "New streaming session started [active sessions: "sv << _session_slots->size() << ']';
+    void insert(const std::shared_ptr<stream::session_t> &session,
+                std::uint32_t launch_session_id,
+                bool hdr_enabled) {
+      std::size_t active_sessions;
+      {
+        auto lg = _session_slots.lock();
+        _session_slots->emplace(session);
+        active_sessions = _session_slots->size();
+      }
+#ifdef _WIN32
+      platf::vulkan_hdr::session_started(
+        launch_session_id,
+        session.get(),
+        hdr_enabled
+      );
+#else
+      (void) launch_session_id;
+      (void) hdr_enabled;
+#endif
+      BOOST_LOG(info) << "New streaming session started [active sessions: "sv << active_sessions << ']';
     }
 
     /**
@@ -1315,7 +1387,7 @@ namespace rtsp_stream {
     }
 
     auto stream_session = stream::session::alloc(config, session);
-    server->insert(stream_session);
+    server->insert(stream_session, session.id, config.monitor.dynamicRange != 0);
 
     if (stream::session::start(*stream_session, sock.remote_endpoint().address().to_string())) {
       BOOST_LOG(error) << "Failed to start a streaming session"sv;
@@ -1351,6 +1423,10 @@ namespace rtsp_stream {
   void start() {
     platf::set_thread_name("rtsp");
     auto shutdown_event = mail::man->event<bool>(mail::shutdown);
+
+#ifdef _WIN32
+    platf::vulkan_hdr::initialize();
+#endif
 
     server.map("OPTIONS"sv, &cmd_option);
     server.map("DESCRIBE"sv, &cmd_describe);

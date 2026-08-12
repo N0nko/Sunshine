@@ -67,6 +67,30 @@ namespace deck_protocol {
     };
   }  // namespace display
 
+  namespace microphone {
+    constexpr std::uint8_t configure = 1;
+    constexpr std::uint8_t status = 2;
+    constexpr std::uint8_t opus = 3;
+    constexpr std::uint8_t opus_codec = 1;
+    constexpr std::uint8_t channel_count = 1;
+    constexpr std::uint32_t sample_rate = 48000;
+    constexpr std::uint16_t frame_samples = 960;
+
+    enum class status_e : std::uint8_t {
+      active = 2,
+      unsupported = 3,
+      failed = 4,
+      disabled = 5,
+    };
+
+    struct config_t {
+      bool enabled;
+      std::uint8_t codec;
+      std::uint8_t channels;
+      std::uint32_t sample_rate;
+    };
+  }  // namespace microphone
+
   constexpr std::uint16_t read_le16(const std::uint8_t *data) {
     return static_cast<std::uint16_t>(data[0]) |
            static_cast<std::uint16_t>(data[1]) << 8;
@@ -209,6 +233,52 @@ namespace deck_protocol {
     std::array<std::uint8_t, 4> payload {};
     payload[0] = static_cast<std::uint8_t>(status);
     payload[1] = static_cast<std::uint8_t>(profile);
+    return payload;
+  }
+
+  inline std::optional<microphone::config_t> parse_microphone_config(
+    const message_view_t &message
+  ) {
+    if (message.feature != feature_e::deck_microphone ||
+        message.opcode != microphone::configure ||
+        message.request_id == 0 ||
+        message.payload.size() != 8) {
+      return std::nullopt;
+    }
+
+    const auto *payload = reinterpret_cast<const std::uint8_t *>(message.payload.data());
+    if (payload[0] > 1 || payload[3] != 0) {
+      return std::nullopt;
+    }
+
+    return microphone::config_t {
+      payload[0] != 0,
+      payload[1],
+      payload[2],
+      read_le32(payload + 4),
+    };
+  }
+
+  inline std::optional<std::string_view> parse_microphone_opus(
+    const message_view_t &message
+  ) {
+    if (message.feature != feature_e::deck_microphone ||
+        message.opcode != microphone::opus ||
+        message.request_id == 0 ||
+        message.payload.size() <= sizeof(std::uint16_t) ||
+        read_le16(reinterpret_cast<const std::uint8_t *>(message.payload.data())) !=
+          microphone::frame_samples) {
+      return std::nullopt;
+    }
+
+    return message.payload.substr(sizeof(std::uint16_t));
+  }
+
+  inline std::array<std::uint8_t, 4> make_microphone_status(
+    microphone::status_e status
+  ) {
+    std::array<std::uint8_t, 4> payload {};
+    payload[0] = static_cast<std::uint8_t>(status);
     return payload;
   }
 }  // namespace deck_protocol

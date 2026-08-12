@@ -590,11 +590,26 @@ namespace rtsp_stream {
      * @note If the client does not begin streaming within the ping_timeout,
      *       the session will be discarded.
      * @param launch_session Streaming session information.
+     * @param replace_same_client Whether an unclaimed request from the same
+     *        authenticated client may be replaced.
+     * @return Whether the launch request was queued.
      */
-    void session_raise(std::shared_ptr<launch_session_t> launch_session) {
-      // If a launch event is still pending, don't overwrite it.
-      if (launch_event.view(0s)) {
-        return;
+    bool session_raise(std::shared_ptr<launch_session_t> launch_session,
+                       bool replace_same_client) {
+      auto pending = launch_event.view(0s);
+      if (pending) {
+        const bool same_authenticated_client =
+          !pending->client_cert.empty() &&
+          !launch_session->client_cert.empty() &&
+          pending->client_cert == launch_session->client_cert;
+        if (!replace_same_client || !same_authenticated_client) {
+          return false;
+        }
+
+        raised_timer.cancel();
+        const auto discarded = launch_event.pop(0s);
+        BOOST_LOG(debug) << "Replacing unclaimed RTSP request for the same paired client: "sv
+                         << (discarded ? discarded->id : 0) << " -> "sv << launch_session->id;
       }
 
       // Raise the new launch session to prepare for the RTSP handshake
@@ -610,6 +625,8 @@ namespace rtsp_stream {
           }
         }
       });
+
+      return true;
     }
 
     /**
@@ -741,8 +758,9 @@ namespace rtsp_stream {
   /**
    * @brief Queue a launch session until the RTSP client connects.
    */
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session) {
-    server.session_raise(std::move(launch_session));
+  bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session,
+                            bool replace_same_client) {
+    return server.session_raise(std::move(launch_session), replace_same_client);
   }
 
   void launch_session_clear(uint32_t launch_session_id) {

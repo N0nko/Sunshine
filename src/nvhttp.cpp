@@ -38,6 +38,7 @@
 #include "utility.h"
 #include "uuid.h"
 #include "video.h"
+#include "warm_resume.h"
 
 using namespace std::literals;
 
@@ -59,6 +60,22 @@ namespace nvhttp {
     static std::mutex mutex;
     return mutex;
   }
+
+  namespace {
+    warm_resume::cache_t warm_resume_cache;
+
+    warm_resume::fingerprint_t make_warm_resume_fingerprint(const rtsp_stream::launch_session_t &session) {
+      return {
+        .appid = session.appid,
+        .width = session.width,
+        .height = session.height,
+        .fps = session.fps,
+        .enable_hdr = session.enable_hdr,
+        .enable_sops = session.enable_sops,
+        .client_cert = session.client_cert,
+      };
+    }
+  }  // namespace
 
   /**
    * @brief HTTPS server backend that adds Sunshine's client-certificate verification.
@@ -1324,6 +1341,9 @@ namespace nvhttp {
       return;
     }
 
+    // A new app cannot reuse stream state retained for an earlier run.
+    warm_resume_cache.clear();
+
     host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
     auto launch_session = make_launch_session(host_audio, args);
 
@@ -1371,6 +1391,13 @@ namespace nvhttp {
       }
     }
 
+    if (!rtsp_stream::launch_session_raise(launch_session)) {
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another client already has a pending streaming session");
+      tree.put("root.gamesession", 0);
+      return;
+    }
+
     tree.put("root.<xmlattr>.status_code", 200);
     tree.put(
       "root.sessionUrl0",
@@ -1382,8 +1409,7 @@ namespace nvhttp {
       )
     );
     tree.put("root.gamesession", 1);
-
-    rtsp_stream::launch_session_raise(launch_session);
+    warm_resume_cache.remember(make_warm_resume_fingerprint(*launch_session));
 
     // Stream was started successfully, we will revert the config when the app or session terminates
     revert_display_configuration = false;
@@ -1414,6 +1440,7 @@ namespace nvhttp {
 
     auto current_appid = proc::proc.running();
     if (current_appid == 0) {
+      warm_resume_cache.clear();
       tree.put("root.resume", 0);
       tree.put("root.<xmlattr>.status_code", 503);
       tree.put("root.<xmlattr>.status_message", "No running app to resume");
@@ -1433,16 +1460,36 @@ namespace nvhttp {
       return;
     }
 
-    // Newer Moonlight clients send localAudioPlayMode on /resume too,
-    // so we should use it if it's present in the args and there are
-    // no active sessions we could be interfering with.
-    const bool no_active_sessions {rtsp_stream::session_count() == 0};
-    if (no_active_sessions && args.find("localAudioPlayMode"s) != std::end(args)) {
-      host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
-    }
+    bool no_active_sessions {rtsp_stream::session_count() == 0};
+    const bool has_host_audio_request {args.find("localAudioPlayMode"s) != std::end(args)};
     const auto launch_session = make_launch_session(host_audio, args);
+    const bool reconnect_requested {util::from_view(get_arg(args, "reconnect", "0")) != 0};
+    const bool fast_resume_requested {util::from_view(get_arg(args, "fastResume", "0")) != 0};
+    const bool fast_resume_matches {
+      reconnect_requested &&
+      fast_resume_requested &&
+      current_appid == launch_session->appid &&
+      warm_resume_cache.matches(make_warm_resume_fingerprint(*launch_session))
+    };
 
-    if (no_active_sessions) {
+    // Replacing the final session can schedule display restoration. Keep that
+    // configuration on the normal resume path instead of racing it.
+    const bool fast_resume_eligible {
+      fast_resume_matches && !config::video.dd.config_revert_on_disconnect
+    };
+    if (fast_resume_eligible && !no_active_sessions) {
+      BOOST_LOG(info) << "Fast resume replacing a stale session for the same paired client"sv;
+      rtsp_stream::terminate_sessions_by_cert(launch_session->client_cert);
+      no_active_sessions = rtsp_stream::session_count() == 0;
+    }
+
+    if (no_active_sessions && has_host_audio_request) {
+      host_audio = util::from_view(get_arg(args, "localAudioPlayMode"));
+      launch_session->host_audio = host_audio;
+    }
+
+    const bool fast_resume_accepted {fast_resume_eligible && no_active_sessions};
+    if (no_active_sessions && !fast_resume_accepted) {
       // We want to prepare display only if there are no active sessions at
       // the moment. This should be done before probing encoders as it could
       // change the active displays.
@@ -1459,6 +1506,8 @@ namespace nvhttp {
 
         return;
       }
+    } else if (fast_resume_accepted) {
+      BOOST_LOG(info) << "Fast resume reusing the active display and encoder state"sv;
     }
 
     auto encryption_mode = net::encryption_mode_for_address(request->remote_endpoint().address());
@@ -1469,6 +1518,14 @@ namespace nvhttp {
       tree.put("root.<xmlattr>.status_message", "Encryption is mandatory for this host but unsupported by the client");
       tree.put("root.gamesession", 0);
 
+      return;
+    }
+
+    if (!rtsp_stream::launch_session_raise(launch_session, reconnect_requested)) {
+      tree.put("root.resume", 0);
+      tree.put("root.fastresume", 0);
+      tree.put("root.<xmlattr>.status_code", 503);
+      tree.put("root.<xmlattr>.status_message", "Another client already has a pending streaming session");
       return;
     }
 
@@ -1483,8 +1540,8 @@ namespace nvhttp {
       )
     );
     tree.put("root.resume", 1);
-
-    rtsp_stream::launch_session_raise(launch_session);
+    tree.put("root.fastresume", fast_resume_accepted ? 1 : 0);
+    warm_resume_cache.remember(make_warm_resume_fingerprint(*launch_session));
   }
 
   /**
@@ -1508,6 +1565,7 @@ namespace nvhttp {
     tree.put("root.cancel", 1);
     tree.put("root.<xmlattr>.status_code", 200);
 
+    warm_resume_cache.clear();
     rtsp_stream::terminate_sessions();
 
     if (proc::proc.running() > 0) {

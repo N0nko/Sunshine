@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - deck/rebuild
+      - deck/rebuild-candidate
 
 permissions:
   contents: read

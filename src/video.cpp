@@ -579,6 +579,13 @@ namespace video {
       }
     }
 
+    bitrate_status_e reconfigure_bitrate(int bitrate_kbps) override {
+      if (!device || !device->nvenc) {
+        return bitrate_status_e::failed;
+      }
+      return device->nvenc->reconfigure_bitrate(bitrate_kbps);
+    }
+
     /**
      * @brief Submit the next frame to NVENC and return the encoded payload.
      *
@@ -608,6 +615,8 @@ namespace video {
     safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
     safe::mail_raw_t::queue_t<packet_t> packets;  ///< Queue receiving encoded video packets for the stream sender.
     safe::mail_raw_t::event_t<bool> idr_events;  ///< Event raised when an IDR frame is requested.
+    safe::mail_raw_t::event_t<bitrate_request_t> bitrate_events;  ///< Live bitrate requests for this stream.
+    safe::mail_raw_t::event_t<bitrate_result_t> bitrate_results;  ///< Encoder-confirmed bitrate results.
     safe::mail_raw_t::event_t<hdr_info_t> hdr_events;  ///< Event carrying updated HDR metadata.
     safe::mail_raw_t::event_t<input::touch_port_t> touch_port_events;  ///< Event carrying updated touch viewport metadata.
 
@@ -2354,7 +2363,7 @@ namespace video {
     int &frame_nr,  // Store progress of the frame number
     safe::mail_t mail,
     img_event_t images,
-    config_t config,
+    config_t &config,
     std::shared_ptr<platf::display_t> disp,
     std::unique_ptr<platf::encode_device_t> encode_device,
     safe::signal_t &reinit_event,
@@ -2392,6 +2401,8 @@ namespace video {
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
     auto idr_events = mail->event<bool>(mail::idr);
     auto invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+    auto bitrate_events = mail->event<bitrate_request_t>(mail::video_bitrate_request);
+    auto bitrate_results = mail->event<bitrate_result_t>(mail::video_bitrate_result);
 
     {
       // Load a dummy image into the AVFrame to ensure we have something to encode
@@ -2406,6 +2417,24 @@ namespace video {
 
     while (true) {
       bool requested_idr_frame = false;
+
+      if (auto request = bitrate_events->try_pop()) {
+        auto status = session->reconfigure_bitrate(request->bitrate_kbps);
+        if (status == bitrate_status_e::applied && request->clamped) {
+          status = bitrate_status_e::clamped;
+        }
+
+        if (status == bitrate_status_e::applied || status == bitrate_status_e::clamped) {
+          config.bitrate = request->bitrate_kbps;
+        }
+
+        bitrate_results->raise(bitrate_result_t {
+          request->request_id,
+          status == bitrate_status_e::applied || status == bitrate_status_e::clamped ?
+            request->bitrate_kbps : 0,
+          status,
+        });
+      }
 
       while (invalidate_ref_frames_events->peek()) {
         if (auto frames = invalidate_ref_frames_events->pop(0ms)) {
@@ -2732,6 +2761,22 @@ namespace video {
             ctx->idr_events->pop();
           }
 
+          if (auto request = ctx->bitrate_events->try_pop()) {
+            auto status = pos->session->reconfigure_bitrate(request->bitrate_kbps);
+            if (status == bitrate_status_e::applied && request->clamped) {
+              status = bitrate_status_e::clamped;
+            }
+            if (status == bitrate_status_e::applied || status == bitrate_status_e::clamped) {
+              ctx->config.bitrate = request->bitrate_kbps;
+            }
+            ctx->bitrate_results->raise(bitrate_result_t {
+              request->request_id,
+              status == bitrate_status_e::applied || status == bitrate_status_e::clamped ?
+                request->bitrate_kbps : 0,
+              status,
+            });
+          }
+
           if (frame_captured && pos->session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
             ctx->shutdown_event->raise(true);
@@ -2932,6 +2977,8 @@ namespace video {
         mail->event<bool>(mail::shutdown),
         mail::man->queue<packet_t>(mail::video_packets),
         std::move(idr_events),
+        mail->event<bitrate_request_t>(mail::video_bitrate_request),
+        mail->event<bitrate_result_t>(mail::video_bitrate_result),
         mail->event<hdr_info_t>(mail::hdr),
         mail->event<input::touch_port_t>(mail::touch_port),
         config,

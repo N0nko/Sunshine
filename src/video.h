@@ -350,6 +350,28 @@ namespace video {
     uint32_t flags;  ///< Encoder flags advertised to clients through GameStream capability responses.
   };
 
+  /** @brief Result of applying a live encoder bitrate request. */
+  enum class bitrate_status_e : uint8_t {
+    applied = 2,  ///< Requested bitrate was applied exactly.
+    clamped = 3,  ///< Host limit was applied successfully.
+    failed = 4,  ///< Encoder rejected the live change.
+    unsupported = 5,  ///< Active encoder cannot change bitrate live.
+  };
+
+  /** @brief Live bitrate work item consumed by the encoder thread. */
+  struct bitrate_request_t {
+    uint32_t request_id;  ///< Client request identifier.
+    int bitrate_kbps;  ///< Host-approved bitrate in Kbps.
+    bool clamped;  ///< Whether the host limit reduced the request.
+  };
+
+  /** @brief Encoder result consumed by the control thread. */
+  struct bitrate_result_t {
+    uint32_t request_id;  ///< Client request identifier.
+    int applied_bitrate_kbps;  ///< Actual bitrate, or zero on failure.
+    bitrate_status_e status;  ///< Encoder application result.
+  };
+
   /**
    * @brief Encoder session state shared by capture and encoding threads.
    */
@@ -381,6 +403,15 @@ namespace video {
      * @param last_frame Last frame.
      */
     virtual void invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
+
+    /**
+     * @brief Reconfigure the active encoder bitrate without restarting it.
+     * @param bitrate_kbps New bitrate in Kbps.
+     * @return Encoder application status.
+     */
+    virtual bitrate_status_e reconfigure_bitrate(int bitrate_kbps) {
+      return bitrate_status_e::unsupported;
+    }
   };
 
   // encoders

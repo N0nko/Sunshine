@@ -110,7 +110,7 @@ jobs:
 
       - name: Test warm resume policy
         working-directory: build/tests
-        run: ./test_sunshine.exe --gtest_color=yes --gtest_filter='WarmResumeCache.*'
+        run: ./test_sunshine.exe --gtest_color=yes --gtest_filter='WarmResumeCache.*:DeckProtocol.*'
 
       - name: Check packaged runtime linkage
         run: |

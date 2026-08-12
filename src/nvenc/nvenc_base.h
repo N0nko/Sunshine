@@ -67,6 +67,13 @@ namespace NVENC_NAMESPACE {
     ::nvenc::nvenc_encoded_frame encode_frame(uint64_t frame_index, bool force_idr) override;
 
     /**
+     * @brief Change the active encoder bitrate without restarting the stream.
+     * @param bitrate_kbps New bitrate in Kbps.
+     * @return Encoder application status.
+     */
+    video::bitrate_status_e reconfigure_bitrate(int bitrate_kbps) override;
+
+    /**
      * @brief Perform reference frame invalidation (RFI) procedure.
      * @param first_frame First frame index of the invalidation range.
      * @param last_frame Last frame index of the invalidation range.
@@ -329,6 +336,15 @@ namespace NVENC_NAMESPACE {
     ) const;
 
     NV_ENC_OUTPUT_PTR output_bitstream = nullptr;
+
+    struct {
+      NV_ENC_INITIALIZE_PARAMS init_params = {NV_ENC_INITIALIZE_PARAMS_VER};
+      NV_ENC_CONFIG config = {NV_ENC_CONFIG_VER};
+      uint32_t framerate = 0;
+      int vbv_percentage_increase = 0;
+      bool dynamic_bitrate = false;
+      bool custom_vbv = false;
+    } reconfigure_state;
 
     struct {
       uint64_t last_encoded_frame_index = 0;

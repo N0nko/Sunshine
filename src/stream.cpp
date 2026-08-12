@@ -7,6 +7,7 @@
 #include <fstream>
 #include <future>
 #include <queue>
+#include <cstring>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
@@ -21,6 +22,7 @@ extern "C" {
 
 // local includes
 #include "config.h"
+#include "deck_protocol.h"
 #include "display_device.h"
 #include "globals.h"
 #include "input.h"
@@ -497,6 +499,7 @@ namespace stream {
 
       safe::mail_raw_t::event_t<bool> idr_events;
       safe::mail_raw_t::event_t<std::pair<int64_t, int64_t>> invalidate_ref_frames_events;
+      safe::mail_raw_t::event_t<video::bitrate_request_t> bitrate_events;
 
       std::unique_ptr<platf::deinit_t> qos;
     } video;  ///< Video worker thread state for the active stream.
@@ -532,6 +535,7 @@ namespace stream {
 
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
+      safe::mail_raw_t::event_t<video::bitrate_result_t> bitrate_results;
     } control;  ///< Runtime state for the encrypted GameStream control channel.
 
     std::uint32_t launch_session_id;  ///< RTSP launch-session ID associated with this stream.
@@ -1065,6 +1069,75 @@ namespace stream {
     return 0;
   }
 
+  int send_extension(
+    session_t *session,
+    deck_protocol::feature_e feature,
+    std::uint8_t opcode,
+    std::uint32_t request_id,
+    std::string_view extension_payload
+  ) {
+    if (!session->control.peer || extension_payload.size() > deck_protocol::max_payload_size) {
+      return -1;
+    }
+
+    constexpr auto max_plaintext_size =
+      sizeof(control_header_v2) + deck_protocol::header_size + deck_protocol::max_payload_size;
+    std::array<std::uint8_t, max_plaintext_size> plaintext {};
+    auto *control = reinterpret_cast<control_header_v2 *>(plaintext.data());
+    control->type = deck_protocol::control_packet_type;
+    control->payloadLength = static_cast<std::uint16_t>(
+      deck_protocol::header_size + extension_payload.size()
+    );
+
+    auto *extension = control->payload();
+    if (!deck_protocol::write_header(
+          extension,
+          plaintext.size() - sizeof(control_header_v2),
+          feature,
+          opcode,
+          request_id,
+          extension_payload.size()
+        )) {
+      return -1;
+    }
+    std::memcpy(
+      extension + deck_protocol::header_size,
+      extension_payload.data(),
+      extension_payload.size()
+    );
+
+    const std::size_t plaintext_size =
+      sizeof(control_header_v2) + deck_protocol::header_size + extension_payload.size();
+    std::array<std::uint8_t,
+      sizeof(control_encrypted_t) +
+      crypto::cipher::round_to_pkcs7_padded(max_plaintext_size) +
+      crypto::cipher::tag_size> encrypted_payload;
+    auto payload = encode_control(
+      session,
+      std::string_view {reinterpret_cast<const char *>(plaintext.data()), plaintext_size},
+      encrypted_payload
+    );
+    if (payload.empty()) {
+      return -1;
+    }
+
+    return session->broadcast_ref->control_server.send(payload, session->control.peer);
+  }
+
+  int send_bitrate_result(session_t *session, const video::bitrate_result_t &result) {
+    const auto payload = deck_protocol::make_bitrate_result(
+      static_cast<deck_protocol::bitrate::status_e>(result.status),
+      static_cast<std::uint32_t>(result.applied_bitrate_kbps)
+    );
+    return send_extension(
+      session,
+      deck_protocol::feature_e::live_bitrate,
+      deck_protocol::bitrate::result,
+      result.request_id,
+      std::string_view {reinterpret_cast<const char *>(payload.data()), payload.size()}
+    );
+  }
+
   /**
    * @brief Send the selected HDR mode to the connected client over the control channel.
    *
@@ -1152,6 +1225,54 @@ namespace stream {
         << "lastFrame [" << lastFrame << ']';
 
       session->video.invalidate_ref_frames_events->raise(std::make_pair(firstFrame, lastFrame));
+    });
+
+    server->map(deck_protocol::control_packet_type, [&](session_t *session, const std::string_view &payload) {
+      const auto message = deck_protocol::parse(payload);
+      if (!message) {
+        BOOST_LOG(warning) << "Discarding malformed Deck extension message"sv;
+        return;
+      }
+
+      if (message->feature != deck_protocol::feature_e::live_bitrate) {
+        BOOST_LOG(debug) << "Ignoring unsupported Deck extension feature "sv
+                         << static_cast<int>(message->feature);
+        return;
+      }
+
+      const auto requested = deck_protocol::parse_bitrate_request(*message);
+      if (!requested ||
+          *requested < deck_protocol::bitrate::minimum_kbps ||
+          *requested > deck_protocol::bitrate::maximum_kbps) {
+        BOOST_LOG(warning) << "Invalid live bitrate extension request"sv;
+        if (message->request_id != 0) {
+          send_bitrate_result(session, video::bitrate_result_t {
+            message->request_id,
+            0,
+            video::bitrate_status_e::failed,
+          });
+        }
+        return;
+      }
+
+      int bitrate_kbps = static_cast<int>(*requested);
+      if (config::video.max_bitrate > 0) {
+        bitrate_kbps = std::min(bitrate_kbps, config::video.max_bitrate);
+      }
+      if (bitrate_kbps < static_cast<int>(deck_protocol::bitrate::minimum_kbps)) {
+        send_bitrate_result(session, video::bitrate_result_t {
+          message->request_id,
+          0,
+          video::bitrate_status_e::failed,
+        });
+        return;
+      }
+
+      session->video.bitrate_events->raise(video::bitrate_request_t {
+        message->request_id,
+        bitrate_kbps,
+        bitrate_kbps != static_cast<int>(*requested),
+      });
     });
 
     server->map(packetTypes[IDX_INPUT_DATA], [&](session_t *session, const std::string_view &payload) {
@@ -1311,6 +1432,14 @@ namespace stream {
               auto hdr_info = hdr_queue->pop();
 
               send_hdr_mode(session, std::move(hdr_info));
+            }
+
+            auto &bitrate_results = session->control.bitrate_results;
+            while (session->control.peer && bitrate_results->peek()) {
+              auto result = bitrate_results->pop();
+              if (result) {
+                send_bitrate_result(session, *result);
+              }
             }
           }
 
@@ -2265,6 +2394,7 @@ namespace stream {
       session->control.connect_data = launch_session.control_connect_data;
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
+      session->control.bitrate_results = mail->event<video::bitrate_result_t>(mail::video_bitrate_result);
       session->control.legacy_input_enc_iv = launch_session.iv;
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,
@@ -2273,6 +2403,7 @@ namespace stream {
 
       session->video.idr_events = mail->event<bool>(mail::idr);
       session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
+      session->video.bitrate_events = mail->event<video::bitrate_request_t>(mail::video_bitrate_request);
       session->video.lowseq = 0;
       session->video.ping_payload = launch_session.av_ping_payload;
       if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {

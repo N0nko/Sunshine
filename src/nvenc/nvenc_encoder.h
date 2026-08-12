@@ -16,6 +16,7 @@ namespace platf {
 }
 
 namespace video {
+  enum class bitrate_status_e : std::uint8_t;
   struct config_t;
   struct sunshine_colorspace_t;
 }  // namespace video
@@ -61,6 +62,13 @@ namespace nvenc {
      * @return Encoded frame.
      */
     virtual nvenc_encoded_frame encode_frame(std::uint64_t frame_index, bool force_idr) = 0;
+
+    /**
+     * @brief Change the active encoder bitrate without restarting it.
+     * @param bitrate_kbps New bitrate in Kbps.
+     * @return Encoder application status.
+     */
+    virtual video::bitrate_status_e reconfigure_bitrate(int bitrate_kbps) = 0;
 
     /**
      * @brief Invalidate reference frames in the requested range.

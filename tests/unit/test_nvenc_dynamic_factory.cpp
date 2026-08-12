@@ -17,6 +17,7 @@
 
   // local includes
   #include "src/nvenc/nvenc_dynamic_factory.h"
+  #include "src/video.h"
 
 namespace {
 
@@ -53,6 +54,10 @@ namespace {
 
     nvenc::nvenc_encoded_frame encode_frame(std::uint64_t frame_index, bool force_idr) override {
       return {{}, frame_index, force_idr, false};
+    }
+
+    video::bitrate_status_e reconfigure_bitrate(int) override {
+      return video::bitrate_status_e::unsupported;
     }
 
     bool invalidate_ref_frames(std::uint64_t, std::uint64_t) override {

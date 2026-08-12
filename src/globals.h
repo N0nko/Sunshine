@@ -59,6 +59,7 @@ namespace mail {
   MAIL(invalidate_ref_frames);  ///< Invalidate ref frames.
   MAIL(video_bitrate_request);  ///< Requested live video bitrate.
   MAIL(video_bitrate_result);  ///< Applied live video bitrate result.
+  MAIL(remote_display_result);  ///< Remote display profile result.
   MAIL(gamepad_feedback);  ///< Gamepad feedback.
   MAIL(hdr);  ///< HDR.
 #undef MAIL

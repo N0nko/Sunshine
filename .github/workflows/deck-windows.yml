@@ -3,6 +3,9 @@ name: Deck Sunshine Windows AMD64
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - deck/rebuild
 
 permissions:
   contents: read

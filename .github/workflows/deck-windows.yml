@@ -1,0 +1,148 @@
+---
+name: Deck Sunshine Windows AMD64
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - deck/rebuild
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deck-sunshine-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.14'
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          submodules: recursive
+
+      - name: Setup MSYS2 UCRT64
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884  # v2.32.0
+        with:
+          msystem: ucrt64
+          update: true
+          install: wget
+
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm \
+            git \
+            mingw-w64-ucrt-x86_64-boost \
+            mingw-w64-ucrt-x86_64-cmake \
+            mingw-w64-ucrt-x86_64-cppwinrt \
+            mingw-w64-ucrt-x86_64-curl-winssl \
+            mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-harfbuzz \
+            mingw-w64-ucrt-x86_64-miniupnpc \
+            mingw-w64-ucrt-x86_64-MinHook \
+            mingw-w64-ucrt-x86_64-nlohmann-json \
+            mingw-w64-ucrt-x86_64-onevpl \
+            mingw-w64-ucrt-x86_64-openssl \
+            mingw-w64-ucrt-x86_64-opus \
+            mingw-w64-ucrt-x86_64-qt6-static \
+            mingw-w64-ucrt-x86_64-libtiff \
+            mingw-w64-ucrt-x86_64-toolchain
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: 'lts/*'
+
+      - name: Export Node.js path
+        shell: pwsh
+        run: |
+          $nodePath = Split-Path -Parent (Get-Command node).Source
+          "NODEJS_PATH=$nodePath" >> $env:GITHUB_ENV
+
+      - name: Setup Python
+        id: setup-python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          enable-cache: true
+
+      - name: Sync Python tools
+        env:
+          MSYS2_PATH_TYPE: inherit
+          UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: uv sync --locked --no-python-downloads --no-install-project
+
+      - name: Build Sunshine
+        env:
+          BRANCH: ${{ github.ref_name }}
+          BUILD_VERSION: '2026.813.39'
+          COMMIT: ${{ github.sha }}
+        run: |
+          export PATH="$PATH:$(cygpath "$NODEJS_PATH")"
+          cmake \
+            -B build \
+            -G Ninja \
+            -S . \
+            -DBUILD_DOCS=OFF \
+            -DBUILD_TESTS=ON \
+            -DBUILD_WERROR=ON \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+            -DSUNSHINE_ASSETS_DIR=assets \
+            -DSUNSHINE_PUBLISHER_NAME="${GITHUB_REPOSITORY_OWNER}" \
+            -DSUNSHINE_PUBLISHER_WEBSITE="https://github.com/${GITHUB_REPOSITORY}" \
+            -DSUNSHINE_PUBLISHER_ISSUE_URL="https://github.com/${GITHUB_REPOSITORY}/issues"
+          ninja -C build
+
+      - name: Test warm resume policy
+        working-directory: build/tests
+        run: ./test_sunshine.exe --gtest_color=yes --gtest_filter='WarmResumeCache.*:DeckProtocol.*'
+
+      - name: Check packaged runtime linkage
+        run: |
+          set -euo pipefail
+          for binary in build/sunshine.exe build/tools/audio-info.exe build/tools/dxgi-info.exe build/tools/sunshinesvc.exe; do
+            unexpected="$(ldd "$binary" | awk '
+              BEGIN { IGNORECASE = 1 }
+              $1 == "zlib1.dll" { next }
+              $1 ~ /^minhook-detours\..*\.dll$/ { next }
+              $1 ~ /^api-ms-win-/ { next }
+              $1 ~ /^ext-ms-win-/ { next }
+              $0 ~ /=>[[:space:]]+not found/ { print }
+              $0 ~ /=>[[:space:]]+\/(clangarm64|clang64|mingw32|mingw64|ucrt64)\/bin\// { print }
+            ')"
+            if [[ -n "$unexpected" ]]; then
+              echo "$unexpected"
+              echo "Unexpected runtime dependency in $binary"
+              exit 1
+            fi
+          done
+
+      - name: Package portable ZIP
+        run: |
+          mkdir -p artifacts
+          cd build
+          cpack -G ZIP
+          mv ./cpack_artifacts/Sunshine.zip ../artifacts/Sunshine-Deck-Windows-AMD64.zip
+          cd ..
+          sha256sum artifacts/Sunshine-Deck-Windows-AMD64.zip > artifacts/SHA256SUMS.txt
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: Sunshine-Deck-Windows-AMD64
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 1

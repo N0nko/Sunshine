@@ -30,6 +30,7 @@ extern "C" {
 #include "network.h"
 #include "platform/common.h"
 #include "process.h"
+#include "remote_display.h"
 #include "stream.h"
 #include "sync.h"
 #include "system_tray.h"
@@ -536,10 +537,14 @@ namespace stream {
       platf::feedback_queue_t feedback_queue;
       safe::mail_raw_t::event_t<video::hdr_info_t> hdr_queue;
       safe::mail_raw_t::event_t<video::bitrate_result_t> bitrate_results;
+      safe::mail_raw_t::event_t<remote_display::result_t> remote_display_results;
+      std::shared_ptr<std::atomic_bool> remote_display_apply_pending;
     } control;  ///< Runtime state for the encrypted GameStream control channel.
 
     std::uint32_t launch_session_id;  ///< RTSP launch-session ID associated with this stream.
     std::string client_cert;  ///< PEM certificate for the paired client owning the stream.
+    bool intentional_disconnect = false;  ///< Client supplied a clean disconnect marker.
+    bool remote_display_managed = false;  ///< Remote display policy owns topology restoration.
 
     safe::mail_raw_t::event_t<bool> shutdown_event;  ///< Event raised when the stream should shut down.
     safe::signal_t controlEnd;  ///< Signal raised when the control channel exits.
@@ -661,6 +666,10 @@ namespace stream {
       rtsp_stream::launch_session_clear(session_p->launch_session_id);
 
       session_p->control.peer = peer;
+      remote_display::session_connected(
+        session_p->client_cert,
+        session_p->launch_session_id
+      );
 
       // Use the local address from the control connection as the source address
       // for other communications to the client. This is necessary to ensure
@@ -1138,6 +1147,23 @@ namespace stream {
     );
   }
 
+  int send_remote_display_result(
+    session_t *session,
+    const remote_display::result_t &result
+  ) {
+    const auto payload = deck_protocol::make_display_result(
+      static_cast<deck_protocol::display::status_e>(result.status),
+      static_cast<deck_protocol::display::profile_e>(result.profile)
+    );
+    return send_extension(
+      session,
+      deck_protocol::feature_e::remote_display,
+      deck_protocol::display::result,
+      result.request_id,
+      std::string_view {reinterpret_cast<const char *>(payload.data()), payload.size()}
+    );
+  }
+
   /**
    * @brief Send the selected HDR mode to the connected client over the control channel.
    *
@@ -1231,6 +1257,79 @@ namespace stream {
       const auto message = deck_protocol::parse(payload);
       if (!message) {
         BOOST_LOG(warning) << "Discarding malformed Deck extension message"sv;
+        return;
+      }
+
+      if (message->feature == deck_protocol::feature_e::remote_display) {
+        if (message->opcode == deck_protocol::display::apply) {
+          const auto profile = deck_protocol::parse_display_apply(*message);
+          if (!profile) {
+            BOOST_LOG(warning) << "Discarding malformed remote display request"sv;
+            return;
+          }
+          if (session->control.remote_display_apply_pending->exchange(true)) {
+            send_remote_display_result(session, remote_display::result_t {
+              message->request_id,
+              static_cast<remote_display::profile_e>(*profile),
+              remote_display::status_e::failed,
+            });
+            return;
+          }
+
+          session->remote_display_managed = true;
+          const auto owner = session->client_cert;
+          const auto generation = session->launch_session_id;
+          const auto request_id = message->request_id;
+          const auto requested_profile =
+            static_cast<remote_display::profile_e>(*profile);
+          const auto results = session->control.remote_display_results;
+          const auto pending = session->control.remote_display_apply_pending;
+          task_pool.push([
+                           owner,
+                           generation,
+                           request_id,
+                           requested_profile,
+                           results,
+                           pending
+                         ]() {
+            const auto status = remote_display::apply_for_session(
+              owner,
+              generation,
+              requested_profile
+            );
+            pending->store(false);
+            results->raise(remote_display::result_t {
+              request_id,
+              requested_profile,
+              status,
+            });
+          });
+          return;
+        }
+
+        if (message->opcode == deck_protocol::display::policy) {
+          const auto policy = deck_protocol::parse_display_policy(*message);
+          if (!policy) {
+            BOOST_LOG(warning) << "Discarding malformed remote display policy"sv;
+            return;
+          }
+          session->remote_display_managed =
+            policy->apply_remote_on_connect || policy->restore_desk_on_disconnect;
+          remote_display::set_policy(
+            session->client_cert,
+            session->launch_session_id,
+            policy->apply_remote_on_connect,
+            policy->restore_desk_on_disconnect
+          );
+          return;
+        }
+
+        if (deck_protocol::is_intentional_display_disconnect(*message)) {
+          session->intentional_disconnect = true;
+          return;
+        }
+
+        BOOST_LOG(warning) << "Discarding unknown remote display operation"sv;
         return;
       }
 
@@ -1439,6 +1538,14 @@ namespace stream {
               auto result = bitrate_results->pop();
               if (result) {
                 send_bitrate_result(session, *result);
+              }
+            }
+
+            auto &remote_display_results = session->control.remote_display_results;
+            while (session->control.peer && remote_display_results->peek()) {
+              auto result = remote_display_results->pop();
+              if (result) {
+                send_remote_display_result(session, *result);
               }
             }
           }
@@ -2310,16 +2417,25 @@ namespace stream {
       BOOST_LOG(debug) << "Resetting Input..."sv;
       input::reset(session.input);
 
+      remote_display::session_disconnected(
+        session.client_cert,
+        session.launch_session_id,
+        session.intentional_disconnect
+      );
+
       // If this is the last session, invoke the platform callbacks
       if (--running_sessions == 0) {
-        bool revert_display_config {config::video.dd.config_revert_on_disconnect};
+        bool revert_display_config {
+          config::video.dd.config_revert_on_disconnect &&
+          !session.remote_display_managed
+        };
         if (proc::proc.running()) {
 #if defined SUNSHINE_TRAY && SUNSHINE_TRAY >= 1
           system_tray::update_tray_pausing(proc::proc.get_last_run_app_name());
 #endif
         } else {
           // We have no app running and also no clients anymore.
-          revert_display_config = true;
+          revert_display_config = !session.remote_display_managed;
         }
 
         if (revert_display_config) {
@@ -2395,6 +2511,10 @@ namespace stream {
       session->control.feedback_queue = mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback);
       session->control.hdr_queue = mail->event<video::hdr_info_t>(mail::hdr);
       session->control.bitrate_results = mail->event<video::bitrate_result_t>(mail::video_bitrate_result);
+      session->control.remote_display_results =
+        mail->event<remote_display::result_t>(mail::remote_display_result);
+      session->control.remote_display_apply_pending =
+        std::make_shared<std::atomic_bool>(false);
       session->control.legacy_input_enc_iv = launch_session.iv;
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,

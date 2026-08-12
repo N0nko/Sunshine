@@ -132,3 +132,78 @@ TEST(DeckProtocol, EncodesDisplayResult) {
   EXPECT_EQ(payload[2], 0);
   EXPECT_EQ(payload[3], 0);
 }
+
+TEST(DeckProtocol, ParsesMicrophoneConfiguration) {
+  std::array<std::uint8_t, deck_protocol::header_size + 8> wire {};
+  ASSERT_TRUE(deck_protocol::write_header(
+    wire.data(),
+    wire.size(),
+    deck_protocol::feature_e::deck_microphone,
+    deck_protocol::microphone::configure,
+    7,
+    8
+  ));
+  auto *payload = wire.data() + deck_protocol::header_size;
+  payload[0] = 1;
+  payload[1] = deck_protocol::microphone::opus_codec;
+  payload[2] = deck_protocol::microphone::channel_count;
+  deck_protocol::write_le32(payload + 4, deck_protocol::microphone::sample_rate);
+
+  const auto message = deck_protocol::parse(std::string_view {
+    reinterpret_cast<const char *>(wire.data()), wire.size()
+  });
+  ASSERT_TRUE(message);
+  const auto config = deck_protocol::parse_microphone_config(*message);
+  ASSERT_TRUE(config);
+  EXPECT_TRUE(config->enabled);
+  EXPECT_EQ(config->codec, deck_protocol::microphone::opus_codec);
+  EXPECT_EQ(config->channels, deck_protocol::microphone::channel_count);
+  EXPECT_EQ(config->sample_rate, deck_protocol::microphone::sample_rate);
+}
+
+TEST(DeckProtocol, ParsesMicrophoneOpusFrame) {
+  std::array<std::uint8_t, deck_protocol::header_size + 6> wire {};
+  ASSERT_TRUE(deck_protocol::write_header(
+    wire.data(),
+    wire.size(),
+    deck_protocol::feature_e::deck_microphone,
+    deck_protocol::microphone::opus,
+    19,
+    6
+  ));
+  auto *payload = wire.data() + deck_protocol::header_size;
+  deck_protocol::write_le16(payload, deck_protocol::microphone::frame_samples);
+  payload[2] = 0x11;
+  payload[3] = 0x22;
+  payload[4] = 0x33;
+  payload[5] = 0x44;
+
+  const auto message = deck_protocol::parse(std::string_view {
+    reinterpret_cast<const char *>(wire.data()), wire.size()
+  });
+  ASSERT_TRUE(message);
+  const auto opus = deck_protocol::parse_microphone_opus(*message);
+  ASSERT_TRUE(opus);
+  EXPECT_EQ(opus->size(), 4U);
+  EXPECT_EQ(static_cast<std::uint8_t>((*opus)[0]), 0x11U);
+}
+
+TEST(DeckProtocol, RejectsMalformedMicrophoneMessages) {
+  std::array<std::uint8_t, deck_protocol::header_size + 8> wire {};
+  ASSERT_TRUE(deck_protocol::write_header(
+    wire.data(),
+    wire.size(),
+    deck_protocol::feature_e::deck_microphone,
+    deck_protocol::microphone::configure,
+    1,
+    8
+  ));
+  auto *payload = wire.data() + deck_protocol::header_size;
+  payload[0] = 2;
+
+  const auto message = deck_protocol::parse(std::string_view {
+    reinterpret_cast<const char *>(wire.data()), wire.size()
+  });
+  ASSERT_TRUE(message);
+  EXPECT_FALSE(deck_protocol::parse_microphone_config(*message));
+}

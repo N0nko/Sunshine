@@ -672,6 +672,16 @@ namespace NVENC_NAMESPACE {
                      << frame_size_format % (client_config.bitrate / 8. / client_config.framerate) << " kB";
     log_created_encoder(init_params, enc_config, config, client_config, buffer_format);
 
+    reconfigure_state.init_params = init_params;
+    reconfigure_state.config = enc_config;
+    reconfigure_state.init_params.encodeConfig = &reconfigure_state.config;
+    reconfigure_state.framerate = client_config.framerate;
+    reconfigure_state.vbv_percentage_increase = config.vbv_percentage_increase;
+    reconfigure_state.dynamic_bitrate =
+      get_encoder_cap(init_params.encodeGUID, NV_ENC_CAPS_SUPPORT_DYN_BITRATE_CHANGE);
+    reconfigure_state.custom_vbv =
+      get_encoder_cap(init_params.encodeGUID, NV_ENC_CAPS_SUPPORT_CUSTOM_VBV_BUF_SIZE);
+
     encoder_state = {};
     fail_guard.disable();
     return true;
@@ -706,6 +716,47 @@ namespace NVENC_NAMESPACE {
 
     encoder_state = {};
     encoder_params = {};
+    reconfigure_state = {};
+  }
+
+  video::bitrate_status_e nvenc_base::reconfigure_bitrate(int bitrate_kbps) {
+    if (!encoder || bitrate_kbps < 500 || bitrate_kbps > 500000) {
+      return video::bitrate_status_e::failed;
+    }
+    if (!reconfigure_state.dynamic_bitrate) {
+      return video::bitrate_status_e::unsupported;
+    }
+
+    const auto requested_bitrate = static_cast<uint32_t>(bitrate_kbps) * 1000;
+    if (reconfigure_state.config.rcParams.averageBitRate == requested_bitrate) {
+      return video::bitrate_status_e::applied;
+    }
+
+    const uint32_t old_bitrate = reconfigure_state.config.rcParams.averageBitRate;
+    const uint32_t old_vbv = reconfigure_state.config.rcParams.vbvBufferSize;
+    reconfigure_state.config.rcParams.averageBitRate = requested_bitrate;
+
+    if (reconfigure_state.custom_vbv && reconfigure_state.framerate > 0) {
+      auto vbv_size = requested_bitrate / reconfigure_state.framerate;
+      if (reconfigure_state.vbv_percentage_increase > 0) {
+        vbv_size += vbv_size * reconfigure_state.vbv_percentage_increase / 100;
+      }
+      reconfigure_state.config.rcParams.vbvBufferSize = vbv_size;
+    }
+
+    NV_ENC_RECONFIGURE_PARAMS params = {NV_ENC_RECONFIGURE_PARAMS_VER};
+    params.reInitEncodeParams = reconfigure_state.init_params;
+    params.reInitEncodeParams.encodeConfig = &reconfigure_state.config;
+
+    if (nvenc_failed(nvenc->nvEncReconfigureEncoder(encoder, &params))) {
+      reconfigure_state.config.rcParams.averageBitRate = old_bitrate;
+      reconfigure_state.config.rcParams.vbvBufferSize = old_vbv;
+      BOOST_LOG(error) << "NvEnc: live bitrate reconfiguration failed: " << last_nvenc_error_string;
+      return video::bitrate_status_e::failed;
+    }
+
+    BOOST_LOG(info) << "NvEnc: live bitrate set to " << bitrate_kbps << " Kbps";
+    return video::bitrate_status_e::applied;
   }
 
   ::nvenc::nvenc_encoded_frame nvenc_base::encode_frame(uint64_t frame_index, bool force_idr) {

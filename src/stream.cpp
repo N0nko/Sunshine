@@ -4,10 +4,13 @@
  */
 
 // standard includes
+#include <atomic>
+#include <cstring>
 #include <fstream>
 #include <future>
+#include <memory>
 #include <queue>
-#include <cstring>
+#include <span>
 
 // lib includes
 #include <boost/endian/arithmetic.hpp>
@@ -29,6 +32,9 @@ extern "C" {
 #include "logging.h"
 #include "network.h"
 #include "platform/common.h"
+#ifdef _WIN32
+  #include "platform/windows/deck_microphone.h"
+#endif
 #include "process.h"
 #include "remote_display.h"
 #include "stream.h"
@@ -470,6 +476,11 @@ namespace stream {
     control_server_t control_server;  ///< ENet server for GameStream control packets.
   };
 
+  struct deck_microphone_result_t {
+    std::uint32_t request_id;
+    deck_protocol::microphone::status_e status;
+  };
+
   /**
    * @brief Runtime state for one audio/video streaming session.
    */
@@ -539,6 +550,10 @@ namespace stream {
       safe::mail_raw_t::event_t<video::bitrate_result_t> bitrate_results;
       safe::mail_raw_t::event_t<remote_display::result_t> remote_display_results;
       std::shared_ptr<std::atomic_bool> remote_display_apply_pending;
+      safe::mail_raw_t::event_t<deck_microphone_result_t> deck_microphone_results;
+      std::shared_ptr<std::atomic_bool> deck_microphone_alive;
+      std::shared_ptr<std::atomic_uint32_t> deck_microphone_operation;
+      std::shared_ptr<std::mutex> deck_microphone_config_mutex;
     } control;  ///< Runtime state for the encrypted GameStream control channel.
 
     std::uint32_t launch_session_id;  ///< RTSP launch-session ID associated with this stream.
@@ -1164,6 +1179,20 @@ namespace stream {
     );
   }
 
+  int send_deck_microphone_status(
+    session_t *session,
+    const deck_microphone_result_t &result
+  ) {
+    const auto payload = deck_protocol::make_microphone_status(result.status);
+    return send_extension(
+      session,
+      deck_protocol::feature_e::deck_microphone,
+      deck_protocol::microphone::status,
+      result.request_id,
+      std::string_view {reinterpret_cast<const char *>(payload.data()), payload.size()}
+    );
+  }
+
   /**
    * @brief Send the selected HDR mode to the connected client over the control channel.
    *
@@ -1330,6 +1359,113 @@ namespace stream {
         }
 
         BOOST_LOG(warning) << "Discarding unknown remote display operation"sv;
+        return;
+      }
+
+      if (message->feature == deck_protocol::feature_e::deck_microphone) {
+        if (message->opcode == deck_protocol::microphone::opus) {
+          const auto opus = deck_protocol::parse_microphone_opus(*message);
+          if (!opus) {
+            BOOST_LOG(warning) << "Discarding malformed Deck microphone packet"sv;
+            return;
+          }
+
+#ifdef _WIN32
+          if (session->control.deck_microphone_alive->load(std::memory_order_acquire)) {
+            platf::deck_microphone::submit_opus(
+              session->client_cert,
+              session->launch_session_id,
+              message->request_id,
+              std::span<const std::uint8_t> {
+                reinterpret_cast<const std::uint8_t *>(opus->data()),
+                opus->size()
+              }
+            );
+          }
+#endif
+          return;
+        }
+
+        const auto microphone_config = deck_protocol::parse_microphone_config(*message);
+        if (!microphone_config) {
+          BOOST_LOG(warning) << "Discarding malformed Deck microphone configuration"sv;
+          if (message->request_id != 0) {
+            send_deck_microphone_status(session, deck_microphone_result_t {
+              message->request_id,
+              deck_protocol::microphone::status_e::failed,
+            });
+          }
+          return;
+        }
+
+        const bool supported_format =
+          microphone_config->codec == deck_protocol::microphone::opus_codec &&
+          microphone_config->channels == deck_protocol::microphone::channel_count &&
+          microphone_config->sample_rate == deck_protocol::microphone::sample_rate;
+        if (microphone_config->enabled && !supported_format) {
+          send_deck_microphone_status(session, deck_microphone_result_t {
+            message->request_id,
+            deck_protocol::microphone::status_e::unsupported,
+          });
+          return;
+        }
+
+        const auto operation =
+          session->control.deck_microphone_operation->fetch_add(1, std::memory_order_acq_rel) + 1;
+        const auto alive = session->control.deck_microphone_alive;
+        const auto operation_state = session->control.deck_microphone_operation;
+        const auto config_mutex = session->control.deck_microphone_config_mutex;
+        const auto results = session->control.deck_microphone_results;
+        const auto owner = session->client_cert;
+        const auto generation = session->launch_session_id;
+        const auto request_id = message->request_id;
+        const auto config = *microphone_config;
+        task_pool.push([
+                         alive,
+                         operation_state,
+                         config_mutex,
+                         results,
+                         owner,
+                         generation,
+                         request_id,
+                         operation,
+                         config
+                       ]() {
+          std::lock_guard config_lock(*config_mutex);
+          if (!alive->load(std::memory_order_acquire) ||
+              operation_state->load(std::memory_order_acquire) != operation) {
+            return;
+          }
+
+          auto status = config.enabled ?
+            deck_protocol::microphone::status_e::unsupported :
+            deck_protocol::microphone::status_e::disabled;
+#ifdef _WIN32
+          if (config.enabled) {
+            status = static_cast<deck_protocol::microphone::status_e>(
+              platf::deck_microphone::start(
+                owner,
+                generation,
+                platf::deck_microphone::codec_e::opus,
+                config.sample_rate
+              )
+            );
+          } else {
+            platf::deck_microphone::stop(owner, generation);
+            status = deck_protocol::microphone::status_e::disabled;
+          }
+#endif
+
+          if (!alive->load(std::memory_order_acquire)) {
+#ifdef _WIN32
+            platf::deck_microphone::stop(owner, generation);
+#endif
+            return;
+          }
+          if (operation_state->load(std::memory_order_acquire) == operation) {
+            results->raise(deck_microphone_result_t {request_id, status});
+          }
+        });
         return;
       }
 
@@ -1546,6 +1682,14 @@ namespace stream {
               auto result = remote_display_results->pop();
               if (result) {
                 send_remote_display_result(session, *result);
+              }
+            }
+
+            auto &deck_microphone_results = session->control.deck_microphone_results;
+            while (session->control.peer && deck_microphone_results->peek()) {
+              auto result = deck_microphone_results->pop();
+              if (result) {
+                send_deck_microphone_status(session, *result);
               }
             }
           }
@@ -2407,6 +2551,15 @@ namespace stream {
         task_pool.cancel(force_kill);
       });
 
+      session.control.deck_microphone_alive->store(false, std::memory_order_release);
+      session.control.deck_microphone_operation->fetch_add(1, std::memory_order_acq_rel);
+#ifdef _WIN32
+      {
+        std::lock_guard config_lock(*session.control.deck_microphone_config_mutex);
+        platf::deck_microphone::stop(session.client_cert, session.launch_session_id);
+      }
+#endif
+
       BOOST_LOG(debug) << "Waiting for video to end..."sv;
       session.videoThread.join();
       BOOST_LOG(debug) << "Waiting for audio to end..."sv;
@@ -2515,6 +2668,11 @@ namespace stream {
         mail->event<remote_display::result_t>(mail::remote_display_result);
       session->control.remote_display_apply_pending =
         std::make_shared<std::atomic_bool>(false);
+      session->control.deck_microphone_results =
+        mail->event<deck_microphone_result_t>(mail::deck_microphone_result);
+      session->control.deck_microphone_alive = std::make_shared<std::atomic_bool>(true);
+      session->control.deck_microphone_operation = std::make_shared<std::atomic_uint32_t>(0);
+      session->control.deck_microphone_config_mutex = std::make_shared<std::mutex>();
       session->control.legacy_input_enc_iv = launch_session.iv;
       session->control.cipher = crypto::cipher::gcm_t {
         launch_session.gcm_key,

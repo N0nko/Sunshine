@@ -69,6 +69,8 @@ list(APPEND SUNSHINE_DEFINITIONS VIGEMBUS_PACKAGED_VERSION="${VIGEMBUS_PACKAGED_
 
 set(PLATFORM_TARGET_FILES
         "${CMAKE_SOURCE_DIR}/src/platform/windows/publish.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/deck_microphone.cpp"
+        "${CMAKE_SOURCE_DIR}/src/platform/windows/deck_microphone.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.h"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/misc.cpp"
         "${CMAKE_SOURCE_DIR}/src/platform/windows/input.cpp"

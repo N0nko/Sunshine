@@ -60,6 +60,7 @@ namespace mail {
   MAIL(video_bitrate_request);  ///< Requested live video bitrate.
   MAIL(video_bitrate_result);  ///< Applied live video bitrate result.
   MAIL(remote_display_result);  ///< Remote display profile result.
+  MAIL(deck_microphone_result);  ///< Native Deck microphone setup result.
   MAIL(gamepad_feedback);  ///< Gamepad feedback.
   MAIL(hdr);  ///< HDR.
 #undef MAIL

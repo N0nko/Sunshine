@@ -49,8 +49,12 @@ namespace rtsp_stream {
    * @brief Queue a launch session until the RTSP client connects.
    *
    * @param launch_session Session state prepared by the GameStream launch handler.
+   * @param replace_same_client Whether an unclaimed request from the same
+   *        authenticated client may be replaced.
+   * @return Whether the launch request was queued.
    */
-  void launch_session_raise(std::shared_ptr<launch_session_t> launch_session);
+  bool launch_session_raise(std::shared_ptr<launch_session_t> launch_session,
+                            bool replace_same_client = false);
 
   /**
    * @brief Clear state for the specified launch session.

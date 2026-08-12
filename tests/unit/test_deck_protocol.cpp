@@ -70,3 +70,65 @@ TEST(DeckProtocol, EncodesBitrateResult) {
   EXPECT_EQ(payload[0], static_cast<std::uint8_t>(deck_protocol::bitrate::status_e::clamped));
   EXPECT_EQ(deck_protocol::read_le32(payload.data() + 4), 40000U);
 }
+
+TEST(DeckProtocol, ParsesAllowlistedDisplayRequest) {
+  std::array<std::uint8_t, deck_protocol::header_size + 4> wire {};
+  ASSERT_TRUE(deck_protocol::write_header(
+    wire.data(),
+    wire.size(),
+    deck_protocol::feature_e::remote_display,
+    deck_protocol::display::apply,
+    9,
+    4
+  ));
+  wire[deck_protocol::header_size] =
+    static_cast<std::uint8_t>(deck_protocol::display::profile_e::remote);
+
+  const auto message = deck_protocol::parse(std::string_view {
+    reinterpret_cast<const char *>(wire.data()), wire.size()
+  });
+  ASSERT_TRUE(message);
+  const auto profile = deck_protocol::parse_display_apply(*message);
+  ASSERT_TRUE(profile);
+  EXPECT_EQ(*profile, deck_protocol::display::profile_e::remote);
+
+  wire[deck_protocol::header_size] = 4;
+  const auto rejected = deck_protocol::parse(std::string_view {
+    reinterpret_cast<const char *>(wire.data()), wire.size()
+  });
+  ASSERT_TRUE(rejected);
+  EXPECT_FALSE(deck_protocol::parse_display_apply(*rejected));
+}
+
+TEST(DeckProtocol, ParsesDisplayLifecyclePolicy) {
+  std::array<std::uint8_t, deck_protocol::header_size + 4> wire {};
+  ASSERT_TRUE(deck_protocol::write_header(
+    wire.data(),
+    wire.size(),
+    deck_protocol::feature_e::remote_display,
+    deck_protocol::display::policy,
+    0,
+    4
+  ));
+  wire[deck_protocol::header_size] = 0x03;
+
+  const auto message = deck_protocol::parse(std::string_view {
+    reinterpret_cast<const char *>(wire.data()), wire.size()
+  });
+  ASSERT_TRUE(message);
+  const auto policy = deck_protocol::parse_display_policy(*message);
+  ASSERT_TRUE(policy);
+  EXPECT_TRUE(policy->apply_remote_on_connect);
+  EXPECT_TRUE(policy->restore_desk_on_disconnect);
+}
+
+TEST(DeckProtocol, EncodesDisplayResult) {
+  const auto payload = deck_protocol::make_display_result(
+    deck_protocol::display::status_e::applied,
+    deck_protocol::display::profile_e::tv
+  );
+  EXPECT_EQ(payload[0], static_cast<std::uint8_t>(deck_protocol::display::status_e::applied));
+  EXPECT_EQ(payload[1], static_cast<std::uint8_t>(deck_protocol::display::profile_e::tv));
+  EXPECT_EQ(payload[2], 0);
+  EXPECT_EQ(payload[3], 0);
+}

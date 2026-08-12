@@ -43,6 +43,30 @@ namespace deck_protocol {
     };
   }  // namespace bitrate
 
+  namespace display {
+    constexpr std::uint8_t apply = 1;
+    constexpr std::uint8_t result = 2;
+    constexpr std::uint8_t policy = 3;
+    constexpr std::uint8_t intentional_disconnect = 4;
+
+    enum class profile_e : std::uint8_t {
+      desk = 1,
+      remote = 2,
+      tv = 3,
+    };
+
+    enum class status_e : std::uint8_t {
+      applied = 2,
+      unavailable = 3,
+      failed = 4,
+    };
+
+    struct policy_t {
+      bool apply_remote_on_connect;
+      bool restore_desk_on_disconnect;
+    };
+  }  // namespace display
+
   constexpr std::uint16_t read_le16(const std::uint8_t *data) {
     return static_cast<std::uint16_t>(data[0]) |
            static_cast<std::uint16_t>(data[1]) << 8;
@@ -128,6 +152,63 @@ namespace deck_protocol {
     std::array<std::uint8_t, 8> payload {};
     payload[0] = static_cast<std::uint8_t>(status);
     write_le32(payload.data() + 4, applied_kbps);
+    return payload;
+  }
+
+  inline std::optional<display::profile_e> parse_display_apply(
+    const message_view_t &message
+  ) {
+    if (message.feature != feature_e::remote_display ||
+        message.opcode != display::apply ||
+        message.request_id == 0 ||
+        message.payload.size() != 4) {
+      return std::nullopt;
+    }
+
+    const auto *payload = reinterpret_cast<const std::uint8_t *>(message.payload.data());
+    if (payload[1] != 0 || payload[2] != 0 || payload[3] != 0 ||
+        payload[0] < static_cast<std::uint8_t>(display::profile_e::desk) ||
+        payload[0] > static_cast<std::uint8_t>(display::profile_e::tv)) {
+      return std::nullopt;
+    }
+    return static_cast<display::profile_e>(payload[0]);
+  }
+
+  inline std::optional<display::policy_t> parse_display_policy(
+    const message_view_t &message
+  ) {
+    if (message.feature != feature_e::remote_display ||
+        message.opcode != display::policy ||
+        message.request_id != 0 ||
+        message.payload.size() != 4) {
+      return std::nullopt;
+    }
+
+    const auto *payload = reinterpret_cast<const std::uint8_t *>(message.payload.data());
+    if ((payload[0] & ~0x03U) != 0 ||
+        payload[1] != 0 || payload[2] != 0 || payload[3] != 0) {
+      return std::nullopt;
+    }
+    return display::policy_t {
+      (payload[0] & 0x01U) != 0,
+      (payload[0] & 0x02U) != 0,
+    };
+  }
+
+  inline bool is_intentional_display_disconnect(const message_view_t &message) {
+    return message.feature == feature_e::remote_display &&
+           message.opcode == display::intentional_disconnect &&
+           message.request_id == 0 &&
+           message.payload.empty();
+  }
+
+  inline std::array<std::uint8_t, 4> make_display_result(
+    display::status_e status,
+    display::profile_e profile
+  ) {
+    std::array<std::uint8_t, 4> payload {};
+    payload[0] = static_cast<std::uint8_t>(status);
+    payload[1] = static_cast<std::uint8_t>(profile);
     return payload;
   }
 }  // namespace deck_protocol

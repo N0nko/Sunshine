@@ -23,6 +23,15 @@ if(NOT TARGET gtest)
 endif()
 include_directories("${GTEST_SOURCE_DIR}/googletest/include" "${GTEST_SOURCE_DIR}")
 
+# Keep Deck extension policy tests independent from Sunshine's platform and UI
+# globals so they remain fast and deterministic in the portable Windows build.
+add_executable(test_deck_extensions
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_deck_protocol.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_warm_resume.cpp
+        ${CMAKE_SOURCE_DIR}/src/warm_resume.cpp)
+target_link_libraries(test_deck_extensions PRIVATE gtest_main)
+add_test(NAME deck_extensions COMMAND test_deck_extensions)
+
 # coverage
 # https://gcovr.com/en/stable/guide/compiling.html#compiler-options
 option(SUNSHINE_LLVM_COVERAGE "Use LLVM source-based coverage" OFF)

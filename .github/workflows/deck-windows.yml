@@ -107,9 +107,9 @@ jobs:
             -DSUNSHINE_PUBLISHER_ISSUE_URL="https://github.com/${GITHUB_REPOSITORY}/issues"
           ninja -C build
 
-      - name: Test warm resume policy
+      - name: Test Deck extension contracts
         working-directory: build/tests
-        run: ./test_sunshine.exe --gtest_color=yes --gtest_filter='WarmResumeCache.*:DeckProtocol.*'
+        run: ./test_deck_extensions.exe --gtest_color=yes
 
       - name: Check packaged runtime linkage
         run: |

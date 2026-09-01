@@ -1468,6 +1468,23 @@ supported on the current platform.
     </tr>
 </table>
 
+### minimum_fps_deadline_pacing
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Schedule duplicate frames used to maintain the minimum FPS against absolute deadlines. This avoids accumulating conversion and encoding time between repeated frames while keeping newly captured frames and recovery IDRs immediate.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### minimum_fps_target
 
 <table>

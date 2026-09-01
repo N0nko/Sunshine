@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { $tp } from '../../../platform-i18n'
 import PlatformLayout from '../../../PlatformLayout.vue'
+import Checkbox from '../../../Checkbox.vue'
 
 const props = defineProps([
   'platform',
@@ -24,6 +25,13 @@ const config = ref(props.config)
     <input type="number" min="0" max="1000" class="form-control" id="minimum_fps_target" placeholder="0" v-model="config.minimum_fps_target" />
     <div class="form-text">{{ $t("config.minimum_fps_target_desc") }}</div>
   </div>
+
+  <Checkbox class="mb-3"
+            id="minimum_fps_deadline_pacing"
+            locale-prefix="config"
+            v-model="config.minimum_fps_deadline_pacing"
+            default="false"
+  ></Checkbox>
 </template>
 
 <style scoped>

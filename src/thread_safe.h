@@ -462,6 +462,33 @@ namespace safe {
     }
 
     /**
+     * @brief Remove and return the next queued item before an absolute deadline.
+     *
+     * @param deadline Absolute timeout used for the entire wait, including spurious wakeups.
+     * @return Removed queue item, or empty result when the queue is stopped or the deadline expires.
+     */
+    template<class Clock, class Duration>
+    status_t pop_until(const std::chrono::time_point<Clock, Duration> &deadline) {
+      std::unique_lock ul {_lock};
+
+      if (!_continue) {
+        return util::false_v<status_t>;
+      }
+
+      const bool ready = _cv.wait_until(ul, deadline, [this]() {
+        return !_continue || !_queue.empty();
+      });
+      if (!ready || !_continue || _queue.empty()) {
+        return util::false_v<status_t>;
+      }
+
+      auto val = std::move(_queue.front());
+      _queue.erase(std::begin(_queue));
+
+      return val;
+    }
+
+    /**
      * @brief Remove and return the next queued item, waiting when requested.
      *
      * @return Removed queue item, or empty result when the queue is stopped or empty.

@@ -113,6 +113,28 @@ namespace safe {
       return val;
     }
 
+    /**
+     * @brief Remove and return the next event value before an absolute deadline.
+     *
+     * @param deadline Absolute timeout used for the entire wait, including spurious wakeups.
+     * @return Removed event value, or empty result when the event is stopped or the deadline expires.
+     */
+    template<class Clock, class Duration>
+    status_t pop_until(const std::chrono::time_point<Clock, Duration> &deadline) {
+      std::unique_lock ul {_lock};
+
+      if (bool success = _cv.wait_until(ul, deadline, [this] {
+            return (bool) _status || !_continue;
+          });
+          !success || !_continue) {
+        return util::false_v<status_t>;
+      }
+
+      auto val = std::move(_status);
+      _status = util::false_v<status_t>;
+      return val;
+    }
+
     // pop and view should not be used interchangeably
     /**
      * @brief Read the current value without removing it from the queue.
@@ -453,33 +475,6 @@ namespace safe {
         if (!_continue || _cv.wait_for(ul, delay) == std::cv_status::timeout) {
           return util::false_v<status_t>;
         }
-      }
-
-      auto val = std::move(_queue.front());
-      _queue.erase(std::begin(_queue));
-
-      return val;
-    }
-
-    /**
-     * @brief Remove and return the next queued item before an absolute deadline.
-     *
-     * @param deadline Absolute timeout used for the entire wait, including spurious wakeups.
-     * @return Removed queue item, or empty result when the queue is stopped or the deadline expires.
-     */
-    template<class Clock, class Duration>
-    status_t pop_until(const std::chrono::time_point<Clock, Duration> &deadline) {
-      std::unique_lock ul {_lock};
-
-      if (!_continue) {
-        return util::false_v<status_t>;
-      }
-
-      const bool ready = _cv.wait_until(ul, deadline, [this]() {
-        return !_continue || !_queue.empty();
-      });
-      if (!ready || !_continue || _queue.empty()) {
-        return util::false_v<status_t>;
       }
 
       auto val = std::move(_queue.front());

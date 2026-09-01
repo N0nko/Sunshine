@@ -166,7 +166,6 @@
     "bind_address_desc": "Set the specific IP address Sunshine will bind to. If left blank, Sunshine will bind to all available addresses.",
     "capture": "Force a Specific Capture Method",
     "capture_desc": "On automatic mode Sunshine will use the first one that works. NvFBC requires patched nvidia drivers.",
-    "capture_wgc_portable_only": "Windows.Graphics.Capture is unavailable when Sunshine runs as a Windows service. Use the portable build for WGC, or select Desktop Duplication API for the installed service.",
     "cert": "Certificate",
     "cert_desc": "The certificate used for the web UI and Moonlight client pairing. For best compatibility, this should have an RSA-2048 public key.",
     "channels": "Maximum Connected Clients",

@@ -79,11 +79,14 @@ const config = ref(props.config)
           </template>
           <template #windows>
             <option value="ddx">Desktop Duplication API</option>
-            <option value="wgc">Windows.Graphics.Capture {{ $t('_common.beta') }}</option>
+            <option value="wgc">Windows.Graphics.Capture (portable only) {{ $t('_common.beta') }}</option>
           </template>
         </PlatformLayout>
       </select>
       <div class="form-text">{{ $t('config.capture_desc') }}</div>
+      <div class="form-text text-warning" v-if="platform === 'windows' && config.capture === 'wgc'">
+        {{ $t('config.capture_wgc_portable_only') }}
+      </div>
     </div>
 
     <!-- Encoder -->

@@ -10,20 +10,20 @@
 
 using namespace std::chrono_literals;
 
-TEST(ThreadSafeQueueTest, PopUntilReturnsQueuedValue) {
-  safe::queue_t<int> queue;
-  queue.raise(42);
+TEST(ThreadSafeEventTest, PopUntilReturnsRaisedValue) {
+  safe::event_t<int> event;
+  event.raise(42);
 
-  auto value = queue.pop_until(std::chrono::steady_clock::now());
+  auto value = event.pop_until(std::chrono::steady_clock::now());
 
   ASSERT_TRUE(value);
   EXPECT_EQ(*value, 42);
 }
 
-TEST(ThreadSafeQueueTest, PopUntilExpiresWithoutValue) {
-  safe::queue_t<int> queue;
+TEST(ThreadSafeEventTest, PopUntilExpiresWithoutValue) {
+  safe::event_t<int> event;
 
-  auto value = queue.pop_until(std::chrono::steady_clock::now());
+  auto value = event.pop_until(std::chrono::steady_clock::now());
 
   EXPECT_FALSE(value);
 }

@@ -2386,7 +2386,13 @@ namespace video {
     // set max frame time based on client-requested target framerate.
     double minimum_fps_target = (config::video.minimum_fps_target > 0.0) ? config::video.minimum_fps_target : (config.framerate / 2);
     std::chrono::duration<double, std::milli> max_frametime {1000.0 / minimum_fps_target};
-    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count() << "ms)"sv;
+    const auto cadence_period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(max_frametime);
+    std::optional<std::chrono::steady_clock::time_point> cadence_deadline;
+    if (config::video.minimum_fps_deadline_pacing) {
+      cadence_deadline = std::chrono::steady_clock::now() + cadence_period;
+    }
+    BOOST_LOG(info) << "Minimum FPS target set to ~"sv << minimum_fps_target << "fps ("sv << max_frametime.count()
+                    << "ms, deadline pacing "sv << (cadence_deadline ? "enabled"sv : "disabled"sv) << ')';
 
     auto shutdown_event = mail->event<bool>(mail::shutdown);
     auto packets = mail::man->queue<packet_t>(mail::video_packets);
@@ -2423,10 +2429,13 @@ namespace video {
       }
 
       std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
+      bool received_image = false;
 
       // Encode at a minimum FPS to avoid image quality issues with static content
       if (!requested_idr_frame || images->peek()) {
-        if (auto img = images->pop(max_frametime)) {
+        auto img = cadence_deadline ? images->pop_until(*cadence_deadline) : images->pop(max_frametime);
+        if (img) {
+          received_image = true;
           frame_timestamp = img->frame_timestamp;
           if (session->convert(*img)) {
             BOOST_LOG(error) << "Could not convert image"sv;
@@ -2451,9 +2460,24 @@ namespace video {
         break;
       }
 
+      const auto encode_started = std::chrono::steady_clock::now();
       if (encode(frame_nr++, *session, packets, channel_data, frame_timestamp)) {
         BOOST_LOG(error) << "Could not encode video packet"sv;
         return;
+      }
+
+      if (cadence_deadline) {
+        if (received_image || requested_idr_frame) {
+          // Real and recovery frames remain immediate; start a fresh no-frame deadline from this output.
+          *cadence_deadline = encode_started + cadence_period;
+        } else {
+          // Preserve the existing repeat grid and skip elapsed slots rather than emitting a burst.
+          const auto now = std::chrono::steady_clock::now();
+          if (*cadence_deadline <= now) {
+            const auto elapsed_slots = (now - *cadence_deadline) / cadence_period + 1;
+            *cadence_deadline += cadence_period * elapsed_slots;
+          }
+        }
       }
 
       session->request_normal_frame();

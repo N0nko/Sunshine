@@ -235,8 +235,16 @@ namespace platf::dxgi {
     };
 
     DXGI_RATIONAL client_frame_rate_adjusted = adjust_client_frame_rate();
+    // DXGI already paces capture at the display rate; a second timer can oversleep and collapse presents.
+    const bool limit_capture_rate =
+      (std::uint64_t) client_frame_rate_adjusted.Numerator * display_refresh_rate.Denominator <
+      (std::uint64_t) display_refresh_rate.Numerator * client_frame_rate_adjusted.Denominator;
     std::optional<std::chrono::steady_clock::time_point> frame_pacing_group_start;
     uint32_t frame_pacing_group_frames = 0;
+
+    if (!limit_capture_rate) {
+      BOOST_LOG(info) << "Capture rate is at least the display rate; waiting directly for presented frames";
+    }
 
     // Keep the display awake during capture. If the display goes to sleep during
     // capture, best case is that capture stops until it powers back on. However,
@@ -294,7 +302,7 @@ namespace platf::dxgi {
       if (status == capture_e::timeout || (status == capture_e::ok && !frame_pacing_group_start)) {
         status = snapshot(pull_free_image_cb, img_out, 200ms, *cursor);
 
-        if (status == capture_e::ok && img_out) {
+        if (status == capture_e::ok && img_out && limit_capture_rate) {
           frame_pacing_group_start = img_out->frame_timestamp;
 
           if (!frame_pacing_group_start) {

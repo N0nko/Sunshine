@@ -65,6 +65,7 @@ namespace {
      * @brief Preserve configuration and install observable fake devices.
      */
     void SetUp() override {
+      ASSERT_FALSE(task_pool.running());
       original_input_ = config::input;
       config::input.controller = true;
       config::input.gamepad = "xseries";
@@ -84,6 +85,11 @@ namespace {
      */
     void TearDown() override {
       input::terminate_gamepads();
+      {
+        // Drop unexecuted ingress packets before their fake devices and logging are torn down.
+        task_pool_util::TaskPool pending;
+        static_cast<task_pool_util::TaskPool &>(task_pool) = std::move(pending);
+      }
       input::testing::set_platform_input({});
       context_ = nullptr;
       runtime_ = nullptr;

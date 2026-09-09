@@ -48,6 +48,7 @@ jobs:
             mingw-w64-ucrt-x86_64-cppwinrt \
             mingw-w64-ucrt-x86_64-curl-winssl \
             mingw-w64-ucrt-x86_64-gcc \
+            mingw-w64-ucrt-x86_64-gdb \
             mingw-w64-ucrt-x86_64-harfbuzz \
             mingw-w64-ucrt-x86_64-miniupnpc \
             mingw-w64-ucrt-x86_64-MinHook \
@@ -113,8 +114,17 @@ jobs:
         run: ./test_deck_extensions.exe --gtest_color=yes
 
       - name: Test input lifecycle and security regressions
+        id: input-tests
         working-directory: cmake-build-deck/tests
         run: ./test_sunshine.exe --gtest_filter='Input*:*Pairing*:*Crypto*:*Config*:*Nvenc*' --gtest_color=yes
+
+      - name: Diagnose test shutdown failure
+        if: failure() && steps.input-tests.outcome == 'failure'
+        working-directory: cmake-build-deck/tests
+        run: >-
+          gdb --batch -ex 'set pagination off' -ex run -ex 'thread apply all bt 20'
+          --args ./test_sunshine.exe --gtest_filter='Input*:*Pairing*:*Crypto*:*Config*:*Nvenc*'
+          --gtest_color=no
 
       - name: Check packaged runtime linkage
         run: |

@@ -30,10 +30,14 @@ namespace platf::vulkan_hdr {
       std::optional<bool> published_state;
 
       ~publisher_t() {
+        // Readers can retain an event handle after Sunshine exits. Clear it
+        // without invoking logging or lazy initialization during static teardown.
         if (global_event != nullptr) {
+          ResetEvent(global_event);
           CloseHandle(global_event);
         }
         if (local_event != nullptr) {
+          ResetEvent(local_event);
           CloseHandle(local_event);
         }
       }

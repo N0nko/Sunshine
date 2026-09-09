@@ -129,6 +129,7 @@ jobs:
       - name: Check packaged runtime linkage
         run: |
           set -euo pipefail
+          ./cmake-build-deck/sunshine.exe --version
           for binary in cmake-build-deck/sunshine.exe cmake-build-deck/tools/audio-info.exe cmake-build-deck/tools/dxgi-info.exe cmake-build-deck/tools/sunshinesvc.exe; do
             unexpected="$(ldd "$binary" | awk '
               BEGIN { IGNORECASE = 1 }

@@ -30,8 +30,9 @@ namespace input {
    * @brief Reset stream input state after a client disconnect or shutdown.
    *
    * @param input Shared stream input state to reset.
+   * @param release_gamepads Release this connection's virtual controller slots.
    */
-  void reset(std::shared_ptr<input_t> &input);
+  void reset(std::shared_ptr<input_t> &input, bool release_gamepads = false);
 
   /**
    * @brief Destroy every retained virtual gamepad session.

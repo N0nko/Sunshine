@@ -282,6 +282,30 @@ TEST_F(InputGamepadSessionTest, ReusesGamepadsAcrossPauseAndDestroysThemOnTermin
   EXPECT_NE(replacement, resumed);
 }
 
+TEST_F(InputGamepadSessionTest, DisconnectReleasesOnlyItsControllersAndReusesTheSlot) {
+  config::input.retain_gamepads_on_disconnect = false;
+  auto first = input::alloc(std::make_shared<safe::mail_raw_t>(), "deck");
+  auto other = input::alloc(std::make_shared<safe::mail_raw_t>(), "other-client");
+  const platf::gamepad_arrival_t metadata {LI_CTYPE_XBOX, 0, 0};
+  const auto first_id = input::testing::alloc_gamepad(first, 0, metadata);
+  const auto other_id = input::testing::alloc_gamepad(other, 0, metadata);
+  ASSERT_GE(first_id, 0);
+  ASSERT_GE(other_id, 0);
+  ASSERT_NE(first_id, other_id);
+
+  auto resumed = input::alloc(std::make_shared<safe::mail_raw_t>(), "deck");
+  ASSERT_NE(first, resumed);  // A reconnect must not reuse a retiring connection's context.
+  input::reset(first, true);
+  EXPECT_EQ(input::testing::gamepad_id(first, 0), -1);
+  EXPECT_EQ(input::testing::gamepad_id(other, 0), other_id);
+  EXPECT_EQ(input::testing::alloc_gamepad(resumed, 0, metadata), first_id);
+  input::reset(first, true);  // A stale disconnect must not free the reused slot.
+  EXPECT_EQ(input::testing::gamepad_id(resumed, 0), first_id);
+  EXPECT_EQ(input::testing::gamepad_id(other, 0), other_id);
+  input::reset(resumed, true);
+  input::reset(other, true);
+}
+
 TEST_F(InputGamepadSessionTest, RefreshesSharedVirtualInputAfterLicenseStateChanges) {
   ASSERT_NE(context().keyboard, nullptr);
   ASSERT_NE(context().mouse, nullptr);

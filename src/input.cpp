@@ -2203,13 +2203,20 @@ namespace input {
 
   /**
    * @brief Reset the object to its initial empty state.
+   * @param input Disconnected connection's input context.
+   * @param release_gamepads Destroy this connection's controllers instead of retaining their slots.
    */
-  void reset(std::shared_ptr<input_t> &input) {
+  void reset(std::shared_ptr<input_t> &input, bool release_gamepads) {
     task_pool.cancel(key_press_repeat_id);
     task_pool.cancel(input->mouse_left_button_timeout);
 
     // Ensure input is synchronous, by using the task_pool
-    task_pool.push(reset_input_state, input);
+    dispatch_input_task([input, release_gamepads]() {
+      reset_input_state(input);
+      if (release_gamepads) {
+        destroy_gamepads(input);
+      }
+    });
   }
 
   void terminate_gamepads() {
@@ -2305,7 +2312,13 @@ namespace input {
   std::shared_ptr<input_t> alloc(safe::mail_t mail, std::string session_id) {
     std::shared_ptr<input_t> input;
     bool resumed = false;
-    {
+    if (!config::input.retain_gamepads_on_disconnect) {
+      // A fresh context prevents delayed teardown from touching a replacement session.
+      input = std::make_shared<input_t>(
+        mail->event<input::touch_port_t>(mail::touch_port),
+        mail->queue<platf::gamepad_feedback_msg_t>(mail::gamepad_feedback)
+      );
+    } else {
       auto &state = retained_input_state();
       std::lock_guard lock {state.mutex};
       const auto iter = state.inputs.find(session_id);

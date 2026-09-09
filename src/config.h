@@ -291,6 +291,7 @@ namespace config {
 
     bool high_resolution_scrolling;  ///< Enable high-resolution mouse-wheel events.
     bool native_pen_touch;  ///< Enable native pen and touch injection.
+    bool retain_gamepads_on_disconnect = true;  ///< Keep virtual controller slots during a paused stream.
   };
 
   namespace flag {

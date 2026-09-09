@@ -7,6 +7,7 @@ on:
     branches:
       - deck/rebuild
       - deck/rebuild-candidate
+      - deck/rebase-2026.906
 
 permissions:
   contents: read
@@ -89,12 +90,12 @@ jobs:
       - name: Build Sunshine
         env:
           BRANCH: ${{ github.ref_name }}
-          BUILD_VERSION: '2026.813.39'
+          BUILD_VERSION: '2026.906.222525'
           COMMIT: ${{ github.sha }}
         run: |
           export PATH="$PATH:$(cygpath "$NODEJS_PATH")"
           cmake \
-            -B build \
+            -B cmake-build-deck \
             -G Ninja \
             -S . \
             -DBUILD_DOCS=OFF \
@@ -105,16 +106,20 @@ jobs:
             -DSUNSHINE_PUBLISHER_NAME="${GITHUB_REPOSITORY_OWNER}" \
             -DSUNSHINE_PUBLISHER_WEBSITE="https://github.com/${GITHUB_REPOSITORY}" \
             -DSUNSHINE_PUBLISHER_ISSUE_URL="https://github.com/${GITHUB_REPOSITORY}/issues"
-          ninja -C build
+          ninja -C cmake-build-deck
 
       - name: Test Deck extension contracts
-        working-directory: build/tests
+        working-directory: cmake-build-deck/tests
         run: ./test_deck_extensions.exe --gtest_color=yes
+
+      - name: Test input lifecycle and security regressions
+        working-directory: cmake-build-deck/tests
+        run: ./test_sunshine.exe --gtest_filter='Input*:*Pairing*:*Crypto*:*Config*:*Nvenc*' --gtest_color=yes
 
       - name: Check packaged runtime linkage
         run: |
           set -euo pipefail
-          for binary in build/sunshine.exe build/tools/audio-info.exe build/tools/dxgi-info.exe build/tools/sunshinesvc.exe; do
+          for binary in cmake-build-deck/sunshine.exe cmake-build-deck/tools/audio-info.exe cmake-build-deck/tools/dxgi-info.exe cmake-build-deck/tools/sunshinesvc.exe; do
             unexpected="$(ldd "$binary" | awk '
               BEGIN { IGNORECASE = 1 }
               $1 == "zlib1.dll" { next }
@@ -134,7 +139,7 @@ jobs:
       - name: Package portable ZIP
         run: |
           mkdir -p artifacts
-          cd build
+          cd cmake-build-deck
           cpack -G ZIP
           mv ./cpack_artifacts/Sunshine.zip ../artifacts/Sunshine-Deck-Windows-AMD64.zip
           cd ..

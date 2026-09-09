@@ -21,6 +21,13 @@ const config = ref(props.config)
               default="true"
     ></Checkbox>
 
+    <Checkbox class="mb-3"
+              id="retain_gamepads_on_disconnect"
+              locale-prefix="config"
+              v-model="config.retain_gamepads_on_disconnect"
+              default="true"
+    ></Checkbox>
+
     <!-- Emulated Gamepad Type -->
     <div class="mb-3" v-if="config.controller === 'enabled' && platform !== 'macos'">
       <label for="gamepad" class="form-label">{{ $t('config.gamepad') }}</label>

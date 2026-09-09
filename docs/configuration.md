@@ -666,6 +666,33 @@ editing the `conf` file in a text editor. Use the examples as reference.
     </tr>
 </table>
 
+### retain_gamepads_on_disconnect
+
+<table>
+    <tr>
+        <td>Description</td>
+        <td colspan="2">
+            Keep virtual controller slots when a stream disconnects, for fast resume.
+            Disable to free the disconnected client's slots, including when a Steam Deck sleeps.
+            Other clients are unaffected. Reconnection recreates controllers; games without
+            controller hotplug support may require reselection. Transport interruptions that
+            recover without ending the session keep controllers.
+        </td>
+    </tr>
+    <tr>
+        <td>Default</td>
+        <td colspan="2">@code{}
+            enabled
+            @endcode</td>
+    </tr>
+    <tr>
+        <td>Example</td>
+        <td colspan="2">@code{}
+            retain_gamepads_on_disconnect = disabled
+            @endcode</td>
+    </tr>
+</table>
+
 ### native_pen_touch
 
 <table>

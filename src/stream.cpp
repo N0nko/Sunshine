@@ -2622,7 +2622,7 @@ namespace stream {
       session.controlEnd.view();
       // Reset input on session stop to avoid stuck repeated keys
       BOOST_LOG(debug) << "Resetting Input..."sv;
-      input::reset(session.input);
+      input::reset(session.input, !config::input.retain_gamepads_on_disconnect);
 
       remote_display::session_disconnected(
         session.client_cert,

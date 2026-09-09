@@ -61,3 +61,18 @@ CI/fake-backend tests cannot certify physical controller enumeration, the paid
 driver, real hibernation, HDR output, microphone audio or end-to-end pacing.
 These require host/Deck smoke tests after a verified package is installed.
 Do not buy/activate a license automatically or delete the existing ViGEm fallback.
+
+## Shutdown regression found during validation
+
+The first two candidates compiled and passed 297 selected tests plus the 13
+independent Deck contracts, but the full test process failed during static
+destruction. GDB traced the fault through the global RTSP server destructor to
+the custom Vulkan HDR publisher, which attempted to use Boost.Log after teardown.
+Discarding queued fixture input improved test isolation but did not fix that fault.
+
+The RTSP destructor now skips the HDR notification; explicit runtime shutdown
+and session-disconnect notifications are unchanged. The HDR publisher's own
+destructor resets its existing Windows event handles before closing them, without
+logging or initializing any service. This also prevents a surviving reader from
+retaining a signaled HDR event after Sunshine exits. CI must exit normally and
+run the application's version command successfully before packaging.

@@ -474,7 +474,9 @@ namespace rtsp_stream {
   class rtsp_server_t {
   public:
     ~rtsp_server_t() {
-      clear();
+      // Normal shutdown already published HDR state. The publisher and logger
+      // may no longer exist when this process-global server is destroyed.
+      clear(true, false);
     }
 
     /**
@@ -678,11 +680,12 @@ namespace rtsp_stream {
     /**
      * @brief Clear launch sessions.
      * @param all If true, clear all sessions. Otherwise, only clear timed out and stopped sessions.
+     * @param update_hdr_state Publish changes while the HDR publisher and logger are alive.
      * @examples
      * clear(false);
      * @examples_end
      */
-    void clear(bool all = true) {
+    void clear(bool all = true, [[maybe_unused]] bool update_hdr_state = true) {
 #ifdef _WIN32
       std::vector<const stream::session_t *> removed_sessions;
 #endif
@@ -706,6 +709,9 @@ namespace rtsp_stream {
       }
 
 #ifdef _WIN32
+      if (!update_hdr_state) {
+        return;
+      }
       if (all) {
         platf::vulkan_hdr::clear();
       } else {

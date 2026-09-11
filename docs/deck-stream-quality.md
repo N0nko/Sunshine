@@ -41,3 +41,13 @@ Disable the option and restart Sunshine to restore the original packet sender.
 The existing signed display driver, NVENC settings, microphone, touch and
 controller backends are unchanged. Do not install a new display driver or
 change GPU priority/HAGS as part of this candidate.
+
+## Live acceptance status (2026-09-12)
+
+Windows package 232789d passed CI and was compared on a LAN at 800p/90 Hz HDR.
+The enabled run had no presentation gap slots versus 11 and 7 in two legacy runs,
+but every run had no packet-frame gaps and the same 11.112 ms worst-window
+presentation p99. The scene was highly compressible, wire saturation was not
+controlled, and enabled-run host timing was lost to a collector log-rotation
+race. This does not establish causation or a latency/power benefit. The switch
+remains disabled pending a repeated constrained-link comparison.

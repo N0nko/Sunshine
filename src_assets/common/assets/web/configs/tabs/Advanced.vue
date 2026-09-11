@@ -27,6 +27,15 @@ const config = ref(props.config)
       <div class="form-text">{{ $t('config.qp_desc') }}</div>
     </div>
 
+    <div class="mb-3">
+      <label for="adaptive_packet_pacing" class="form-label">{{ $t('config.adaptive_packet_pacing') }}</label>
+      <select id="adaptive_packet_pacing" class="form-select" v-model="config.adaptive_packet_pacing">
+        <option value="disabled">{{ $t('_common.disabled') }}</option>
+        <option value="enabled">{{ $t('_common.enabled') }}</option>
+      </select>
+      <div class="form-text">{{ $t('config.adaptive_packet_pacing_desc') }}</div>
+    </div>
+
     <!-- Min Threads -->
     <div class="mb-3">
       <label for="min_threads" class="form-label">{{ $t('config.min_threads') }}</label>

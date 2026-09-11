@@ -33,6 +33,7 @@ extern "C" {
 #include "input.h"
 #include "logging.h"
 #include "network.h"
+#include "packet_pacing.h"
 #include "platform/common.h"
 #ifdef _WIN32
   #include "platform/windows/deck_microphone.h"
@@ -519,6 +520,7 @@ namespace stream {
       std::string ping_payload;  ///< Payload expected from video-channel ping packets.
 
       int lowseq;  ///< Next base sequence number for video RTP packets.
+      std::atomic<int> pacing_bitrate_kbps {0};  ///< Bitrate successfully applied by the encoder.
       udp::endpoint peer;  ///< Client UDP endpoint for the video channel.
 
       std::optional<crypto::cipher::gcm_t> cipher;  ///< Optional AES-GCM cipher for encrypted video packets.
@@ -1727,6 +1729,9 @@ namespace stream {
             while (session->control.peer && bitrate_results->peek()) {
               auto result = bitrate_results->pop();
               if (result) {
+                if (result->applied_bitrate_kbps > 0 && (result->status == video::bitrate_status_e::applied || result->status == video::bitrate_status_e::clamped)) {
+                  session->video.pacing_bitrate_kbps.store(result->applied_bitrate_kbps, std::memory_order_relaxed);
+                }
                 send_bitrate_result(session, *result);
               }
             }
@@ -2048,8 +2053,22 @@ namespace stream {
         // Generic Segmentation Offload on Linux can't do more than 64.
         send_batch_size = std::min<size_t>(64, send_batch_size);
 
+        const bool adaptive_pacing = config::stream.adaptive_packet_pacing;
+        const auto pacing = packet_pacing::make(
+          session->video.pacing_bitrate_kbps.load(std::memory_order_relaxed),
+          fecPercentage,
+          blocksize + 64,
+          std::chrono::duration_cast<std::chrono::microseconds>(video::capture_frame_interval(session->config.monitor)).count()
+        );
+        if (adaptive_pacing) {
+          send_batch_size = std::min(send_batch_size, pacing.batch_packets);
+        }
+
         // Don't ignore the last ratecontrol group of the previous frame
         auto ratecontrol_frame_start = std::max(ratecontrol_next_frame_start, std::chrono::steady_clock::now());
+        if (adaptive_pacing) {
+          ratecontrol_frame_start = std::chrono::steady_clock::now();
+        }
 
         size_t ratecontrol_frame_packets_sent = 0;
         size_t ratecontrol_group_packets_sent = 0;
@@ -2149,7 +2168,15 @@ namespace stream {
               // Do pacing within the frame.
               // Also trigger pacing before the first send_batch() of the frame
               // to account for the last send_batch() of the previous frame.
-              if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms || ratecontrol_frame_packets_sent == 0) {
+              if (adaptive_pacing) {
+                const auto due = ratecontrol_frame_start + std::chrono::microseconds(
+                                                             pacing.due_us(static_cast<std::uint64_t>(ratecontrol_frame_packets_sent) * (blocksize + 64))
+                                                           );
+                const auto now = std::chrono::steady_clock::now();
+                if (due > now) {
+                  timer->sleep_for(due - now);
+                }
+              } else if (ratecontrol_group_packets_sent >= ratecontrol_packets_in_1ms || ratecontrol_frame_packets_sent == 0) {
                 auto due = ratecontrol_frame_start +
                            std::chrono::duration_cast<std::chrono::nanoseconds>(1ms) *
                              ratecontrol_frame_packets_sent / ratecontrol_packets_in_1ms;
@@ -2739,6 +2766,7 @@ namespace stream {
       session->video.invalidate_ref_frames_events = mail->event<std::pair<int64_t, int64_t>>(mail::invalidate_ref_frames);
       session->video.bitrate_events = mail->event<video::bitrate_request_t>(mail::video_bitrate_request);
       session->video.lowseq = 0;
+      session->video.pacing_bitrate_kbps.store(config.monitor.bitrate, std::memory_order_relaxed);
       session->video.ping_payload = launch_session.av_ping_payload;
       if (config.encryptionFlagsEnabled & SS_ENC_VIDEO) {
         BOOST_LOG(info) << "Video encryption enabled"sv;

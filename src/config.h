@@ -246,6 +246,7 @@ namespace config {
 
     // Limit the packetsize to avoid fragmentation on a low MTU link
     int packetsize;  ///< Maximum payload size for network packets.
+    bool adaptive_packet_pacing;  ///< Opt-in bitrate-aware bursts with bounded intentional delay.
   };
 
   /**

@@ -2010,6 +2010,18 @@ editing the `conf` file in a text editor. Use the examples as reference.
 
 ## Advanced
 
+### adaptive_packet_pacing
+
+Experimental bitrate-aware video packet bursts. Default: `disabled`.
+Enable with `adaptive_packet_pacing = enabled`, then restart Sunshine.
+Uses the last acknowledged encoder bitrate, FEC and framing headroom.
+Intentional pacing is capped at the smaller of 2 ms and one quarter frame;
+OS scheduling and socket blocking can take longer. This is not a bandwidth
+limit or a guarantee of lower latency. It adds no receiver buffer and changes
+neither audio scheduling nor the meaning of the bitrate slider. Disable to
+restore the original sender. Compare packet loss and p95/p99 arrival timing
+alongside latency before retaining it.
+
 ### fec_percentage
 
 <table>

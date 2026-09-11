@@ -236,6 +236,8 @@
     "external_ip": "External IP",
     "external_ip_desc": "If no external IP address is given, Sunshine will automatically detect external IP",
     "fec_percentage": "FEC Percentage",
+    "adaptive_packet_pacing": "Adaptive packet pacing (experimental)",
+    "adaptive_packet_pacing_desc": "Use bitrate-aware packet bursts to reduce network queue spikes. Adds at most 2 ms of intentional pacing per frame (less at high refresh rates); OS scheduling may add more. Disabled preserves the original sender. Restart Sunshine to apply.",
     "fec_percentage_desc": "Percentage of error correcting packets per data packet in each video frame. Higher values can correct for more network packet loss, but at the cost of increasing bandwidth usage.",
     "ffmpeg_auto": "auto -- let ffmpeg decide (default)",
     "file_apps": "Apps File",

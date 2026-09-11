@@ -8,6 +8,7 @@ on:
       - deck/rebuild
       - deck/rebuild-candidate
       - deck/rebase-2026.906
+      - deck/capture-audio-20260911
 
 permissions:
   contents: read

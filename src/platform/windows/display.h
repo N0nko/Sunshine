@@ -15,6 +15,7 @@
 #include <winrt/windows.graphics.capture.h>
 
 // local includes
+#include "lvdd_capture.h"
 #include "src/platform/common.h"
 #include "src/utility.h"
 #include "src/video.h"
@@ -702,6 +703,19 @@ namespace platf::dxgi {
     texture2d_t old_surface_delayed_destruction;  ///< Old surface delayed destruction.
     std::chrono::steady_clock::time_point old_surface_timestamp;  ///< Old surface timestamp.
     std::variant<std::monostate, texture2d_t, std::shared_ptr<platf::img_t>> last_frame_variant;  ///< Last frame variant.
+  };
+
+  /** @brief Direct LVDD GPU mailbox feeding the existing hardware encoder image pool. */
+  class display_lvdd_vram_t: public display_vram_t {
+    lvdd_capture_t source;  ///< Imported producer generation.
+
+  public:
+    /** @brief Initialize only if the driver, adapter and HDR format are compatible. */
+    int init(const ::video::config_t &config, const std::string &display_name);
+    /** @brief Copy the newest mailbox surface into an existing encoder image, on GPU only. */
+    capture_e snapshot(const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &out, std::chrono::milliseconds timeout, bool cursor_visible) override;
+    /** @brief Release the producer texture after GPU submission. */
+    capture_e release_snapshot() override;
   };
 
   /**

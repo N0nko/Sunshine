@@ -1,0 +1,545 @@
+From 7f96cb4e82cb9c929ae1f2c5c6834ee6550edc81 Mon Sep 17 00:00:00 2001
+From: glmatas <matas@gluk.lt>
+Date: Sat, 12 Sep 2026 09:51:36 +0300
+Subject: [PATCH] Add restricted on-demand GPU frame export for Sunshine
+
+---
+ DIRECT_CAPTURE.md                            |  34 ++++
+ src/driver/windows_driver/capture_export.h   | 156 +++++++++++++++++++
+ src/driver/windows_driver/capture_protocol.h |  65 ++++++++
+ src/driver/windows_driver/driver_main.cpp    |  90 ++++++++++-
+ tests/unit/test_capture_protocol.cpp         |  40 +++++
+ 5 files changed, 382 insertions(+), 3 deletions(-)
+ create mode 100644 DIRECT_CAPTURE.md
+ create mode 100644 src/driver/windows_driver/capture_export.h
+ create mode 100644 src/driver/windows_driver/capture_protocol.h
+ create mode 100644 tests/unit/test_capture_protocol.cpp
+
+diff --git a/DIRECT_CAPTURE.md b/DIRECT_CAPTURE.md
+new file mode 100644
+index 0000000..8d0965a
+--- /dev/null
++++ b/DIRECT_CAPTURE.md
+@@ -0,0 +1,34 @@
++# Direct GPU capture experiment
++
++Base: Nonary v1.6.3 plus the existing custom 21 modes and Vulkan HDR patch.
++Candidate package: 1.6.3.3; build with MSVC/WDK and the existing trusted catalog
++certificate. No changes to device ACLs, broker protocol, monitor modes, HDR
++capabilities, or hardware cursor policy.
++
++The private `capture_protocol.h` contract is mirrored in Sunshine. One
++SYSTEM/broker-only IOCTL binds a WDF file to an exact adapter LUID / target ID.
++It pins unnamed NT handles until file cleanup. The capture client duplicates
++them from WUDFHost; ordinary unelevated applications cannot open the interface.
++
++On demand, the existing frame worker copies acquired IddCx surfaces into three
++shared D3D11 textures. They form an overwriteable newest-frame mailbox, not a
++three-frame presentation queue. GPU keyed mutexes protect pixel ownership;
++one nonblocking metadata mutex protects 128 bytes. No CPU pixel readback, encoder,
++capture polling thread, global object names, or extra permanent service is added.
++Protected surfaces are never exported. AcquireBuffer2 supplies source QPC and
++color space; unsupported/missing metadata falls back in Sunshine.
++
++Keep D3D COM resources on the frame worker. File/monitor cleanup pins only NT
++handles, not D3D device/context COM references. Consumer shutdown stops copying;
++the next source update releases the mailbox on that same worker. Mode changes
++close a generation and signal consumers rather than waiting on them.
++
++The driver already disables optional hardware cursors for topology safety.
++Windows therefore composes the cursor into source surfaces. Per-client cursor
++suppression needs the DXGI backend, not a new driver cursor worker.
++
++Validation: build the driver, run `test_libvirtualdisplay`, then test the actual
++signed package with the SYSTEM-only probe and the Sunshine pendulum comparison.
++Unit tests alone do not establish GPU/driver lifecycle correctness. Export the
++installed driver package before deployment. Roll back the candidate INF and
++select DXGI if live validation fails; never disable Windows signature enforcement.
+diff --git a/src/driver/windows_driver/capture_export.h b/src/driver/windows_driver/capture_export.h
+new file mode 100644
+index 0000000..6df0751
+--- /dev/null
++++ b/src/driver/windows_driver/capture_export.h
+@@ -0,0 +1,156 @@
++/** @file capture_export.h
++ * @brief Nonblocking, on-demand export from the existing IddCx frame worker.
++ */
++#pragma once
++#include "capture_protocol.h"
++#include <d3d11.h>
++#include <dxgi1_2.h>
++#include <wrl/client.h>
++#include <atomic>
++#include <memory>
++#include <mutex>
++
++namespace lvdd_export {
++  using Microsoft::WRL::ComPtr;
++  /** @brief An export generation pinned by the client's WDF file object. */
++  struct epoch {
++    HANDLE mapping {}, lock {}, event {};
++    HANDLE handles[lvdd_capture::slots] {};
++    lvdd_capture::shared *data {};
++    unsigned next {};
++
++    ~epoch() {
++      if (data) UnmapViewOfFile(data);
++      for (auto h : handles) if (h) CloseHandle(h);
++      if (mapping) CloseHandle(mapping);
++      if (lock) CloseHandle(lock);
++      if (event) CloseHandle(event);
++    }
++    /** @brief Initialize on the frame worker, never in a mode/assign callback. */
++    bool init(ID3D11Device *device, const D3D11_TEXTURE2D_DESC &source,
++              const IDDCX_METADATA2 &meta, LUID adapter,
++              ComPtr<ID3D11Texture2D> (&textures)[lvdd_capture::slots],
++              ComPtr<IDXGIKeyedMutex> (&keyed)[lvdd_capture::slots]) {
++      mapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0, sizeof(lvdd_capture::shared), nullptr);
++      lock = CreateMutexW(nullptr, FALSE, nullptr);
++      event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
++      if (!mapping || !lock || !event) return false;
++      data = static_cast<lvdd_capture::shared *>(MapViewOfFile(mapping, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(*data)));
++      if (!data) return false;
++      new (data) lvdd_capture::shared {};
++      data->width = source.Width; data->height = source.Height;
++      data->format = source.Format; data->color_space = meta.SurfaceColorSpace;
++      data->sdr_white_nits = meta.SdrWhiteLevel;
++      data->adapter_low = adapter.LowPart; data->adapter_high = adapter.HighPart;
++      D3D11_TEXTURE2D_DESC desc = source;
++      desc.MipLevels = 1; desc.ArraySize = 1;
++      desc.Usage = D3D11_USAGE_DEFAULT; desc.CPUAccessFlags = 0;
++      desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
++      desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
++      for (unsigned i = 0; i < lvdd_capture::slots; ++i) {
++        ComPtr<IDXGIResource1> resource;
++        if (FAILED(device->CreateTexture2D(&desc, nullptr, &textures[i])) ||
++            FAILED(textures[i].As(&resource)) || FAILED(textures[i].As(&keyed[i])) ||
++            FAILED(resource->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &handles[i]))) return false;
++      }
++      return true;
++    }
++    /** @brief Wake the client to reinitialize/fall back; no waits in teardown. */
++    void close(LONG reason = 0) {
++      if (data) InterlockedExchange(reinterpret_cast<volatile LONG *>(&data->state), reason);
++      if (event) SetEvent(event);
++    }
++    /** @brief Build a reply without exposing any named global objects. */
++    lvdd_capture::reply describe() const {
++      lvdd_capture::reply r;
++      r.producer_pid = GetCurrentProcessId(); r.mapping_bytes = sizeof(lvdd_capture::shared);
++      r.mapping = reinterpret_cast<UINT_PTR>(mapping);
++      r.lock = reinterpret_cast<UINT_PTR>(lock); r.event = reinterpret_cast<UINT_PTR>(event);
++      for (unsigned i = 0; i < lvdd_capture::slots; ++i) r.textures[i] = reinterpret_cast<UINT_PTR>(handles[i]);
++      return r;
++    }
++  };
++  /** @brief Per-monitor connection point; holds NT handles, never a D3D device/context. */
++  struct hub {
++    std::atomic<unsigned> readers {0};
++    std::mutex mutex;
++    std::shared_ptr<epoch> current;
++  };
++  /** @brief Pin both handles and subscription until WDF file cleanup (including crashes). */
++  struct binding {
++    std::shared_ptr<hub> source;
++    std::shared_ptr<epoch> pinned;
++    std::uint32_t target {};
++    explicit binding(std::shared_ptr<hub> h, std::uint32_t id) : source(std::move(h)), target(id) { ++source->readers; }
++    ~binding() { --source->readers; }
++  };
++  /** @brief Frame-worker-local publisher; never waits for a consumer or exports protected content. */
++  class producer {
++    std::shared_ptr<hub> hub_;
++    std::shared_ptr<epoch> epoch_;
++    // COM resources must die on the frame worker, not during monitor/file cleanup.
++    ComPtr<ID3D11Texture2D> textures_[lvdd_capture::slots];
++    ComPtr<IDXGIKeyedMutex> keyed_[lvdd_capture::slots];
++    ComPtr<ID3D11DeviceContext> context_;
++    bool failed_ {};
++  public:
++    explicit producer(std::shared_ptr<hub> h) : hub_(std::move(h)) {}
++    ~producer() { if (epoch_) epoch_->close(); }
++    /** @brief Publish newest GPU frame, dropping work if a consumer holds the metadata lock. */
++    void publish(ID3D11Device *device, IDXGIResource *resource, const IDDCX_METADATA2 &meta, LUID adapter) {
++      if (!hub_ || failed_) return;
++      if (!hub_->readers.load(std::memory_order_relaxed)) {
++        if (epoch_) {
++          epoch_->close();
++          std::lock_guard guard(hub_->mutex);
++          if (hub_->current == epoch_) hub_->current.reset();
++          epoch_.reset();
++          for (auto &key : keyed_) key.Reset();
++          for (auto &texture : textures_) texture.Reset();
++          context_.Reset();
++        }
++        return;
++      }
++      ComPtr<ID3D11Texture2D> source;
++      D3D11_TEXTURE2D_DESC desc {};
++      if (meta.HwProtectedSurface || FAILED(resource->QueryInterface(IID_PPV_ARGS(&source)))) {
++        if (epoch_) epoch_->close(-1);
++        failed_ = true; return;
++      }
++      source->GetDesc(&desc);
++      if (!epoch_) {
++        auto candidate = std::make_shared<epoch>();
++        if (!candidate->init(device, desc, meta, adapter, textures_, keyed_)) { failed_ = true; return; }
++        device->GetImmediateContext(&context_);
++        epoch_ = std::move(candidate);
++        std::lock_guard guard(hub_->mutex);
++        if (hub_->current) hub_->current->close();
++        hub_->current = epoch_;
++      }
++      auto &e = *epoch_;
++      if (desc.Width != e.data->width || desc.Height != e.data->height ||
++          desc.Format != e.data->format || meta.SurfaceColorSpace != e.data->color_space) {
++        e.close(-1); failed_ = true; return;
++      }
++      const DWORD lock_result = WaitForSingleObject(e.lock, 0);
++      if (lock_result == WAIT_ABANDONED) { ReleaseMutex(e.lock); e.close(-1); failed_ = true; return; }
++      if (lock_result != WAIT_OBJECT_0) return;
++      for (unsigned n = 0; n < lvdd_capture::slots; ++n) {
++        const unsigned i = (e.next + n) % lvdd_capture::slots;
++        const HRESULT acquired = keyed_[i]->AcquireSync(0, 0);
++        if (acquired == WAIT_TIMEOUT) continue;
++        if (acquired != S_OK) { e.close(-1); failed_ = true; break; }
++        context_->CopyResource(textures_[i].Get(), source.Get());
++        context_->Flush();
++        const HRESULT released = keyed_[i]->ReleaseSync(0);
++        if (FAILED(released)) { e.close(-1); failed_ = true; break; }
++        LARGE_INTEGER now; QueryPerformanceCounter(&now);
++        e.data->frames[i] = {++e.data->produced, meta.PresentDisplayQPCTime, static_cast<std::uint64_t>(now.QuadPart)};
++        e.next = (i + 1) % lvdd_capture::slots;
++        ReleaseMutex(e.lock); SetEvent(e.event); return;
++      }
++      ++e.data->busy_drops;
++      ReleaseMutex(e.lock);
++    }
++  };
++}
+diff --git a/src/driver/windows_driver/capture_protocol.h b/src/driver/windows_driver/capture_protocol.h
+new file mode 100644
+index 0000000..c02f52e
+--- /dev/null
++++ b/src/driver/windows_driver/capture_protocol.h
+@@ -0,0 +1,65 @@
++/**
++ * @file capture_protocol.h
++ * @brief Private, versioned LVDD GPU capture contract; mirrored in Sunshine.
++ */
++#pragma once
++#include <cstddef>
++#include <cstdint>
++#include <type_traits>
++
++namespace lvdd_capture {
++  inline constexpr std::uint32_t version = 1; ///< Incompatible wire changes increment this value.
++  inline constexpr std::uint32_t attach_ioctl = (0x22u << 16) | (3u << 14) | (0x940u << 2); ///< Restricted METHOD_BUFFERED IOCTL.
++  inline constexpr std::uint32_t slots = 3; ///< Overwriteable mailbox, not a presentation queue.
++
++  /** @brief Request for one OS target; handles remain pinned until its device file closes. */
++  struct request {
++    std::uint32_t size {sizeof(request)};
++    std::uint32_t protocol {version};
++    std::uint32_t target_id {};
++    std::uint32_t reserved {};
++    std::uint32_t adapter_low {};
++    std::int32_t adapter_high {};
++  };
++  /** @brief Unnamed NT handles in producer_pid, duplicated by the SYSTEM capture client. */
++  struct reply {
++    std::uint32_t size {sizeof(reply)};
++    std::uint32_t protocol {version};
++    std::uint32_t producer_pid {};
++    std::uint32_t mapping_bytes {};
++    std::uint64_t mapping {};
++    std::uint64_t lock {};
++    std::uint64_t event {};
++    std::uint64_t textures[slots] {};
++  };
++  /** @brief Metadata protected by the shared mutex; pixels are never CPU mapped. */
++  struct frame {
++    std::uint64_t sequence {};
++    std::uint64_t present_qpc {};
++    std::uint64_t acquire_qpc {};
++  };
++  /** @brief Fixed-layout metadata; all fields accessed under lock except atomic state. */
++  struct shared {
++    std::uint32_t size {sizeof(shared)}, protocol {version};
++    volatile std::int32_t state {1}; ///< Aligned Windows interprocess state, written with InterlockedExchange.
++    std::uint32_t width {}, height {}, format {}, color_space {}, sdr_white_nits {};
++    std::uint32_t adapter_low {};
++    std::int32_t adapter_high {};
++    std::uint64_t produced {}, busy_drops {};
++    frame frames[slots] {};
++  };
++  /** @brief Validate the request before looking up monitor state. */
++  constexpr bool valid(const request &r) {
++    return r.size == sizeof(request) && r.protocol == version && !r.reserved;
++  }
++  /** @brief Select the latest mailbox entry without introducing FIFO buffering. */
++  constexpr unsigned latest(const frame (&entries)[slots]) {
++    unsigned result = 0;
++    for (unsigned i = 1; i < slots; ++i)
++      if (entries[i].sequence > entries[result].sequence) result = i;
++    return result;
++  }
++  static_assert(sizeof(request) == 24 && sizeof(reply) == 64);
++  static_assert(sizeof(frame) == 24 && offsetof(shared, frames) == 56);
++  static_assert(std::is_standard_layout_v<shared> && std::is_trivially_copyable_v<shared>);
++}
+diff --git a/src/driver/windows_driver/driver_main.cpp b/src/driver/windows_driver/driver_main.cpp
+index cd6b62b..814bce8 100644
+--- a/src/driver/windows_driver/driver_main.cpp
++++ b/src/driver/windows_driver/driver_main.cpp
+@@ -19,6 +19,7 @@
+ #include <wdf.h>
+ #include <IddCx.h>
+ #include <wrl/client.h>
++#include "capture_export.h"
+ 
+ #include <algorithm>
+ #include <array>
+@@ -121,6 +122,17 @@ namespace {
+     class DeviceState *state {};
+   };
+ 
++  struct CaptureFileContext {
++    lvdd_export::binding *capture {};
++  };
++  WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(CaptureFileContext, GetCaptureFileContext);
++
++  void cleanup_capture_file(WDFOBJECT object) {
++    auto *context = GetCaptureFileContext(object);
++    delete context->capture;
++    context->capture = nullptr;
++  }
++
+   struct HdrProfileRetentionWorkItemContext {
+     vdd::DisplayDescriptor descriptor {};
+     std::uint32_t target_id {};
+@@ -135,6 +147,9 @@ namespace {
+ 
+   struct MonitorRecord {
+     vdd::DisplayDescriptor descriptor {};
++    std::uint32_t capture_target_id {UINT32_MAX};
++    LUID capture_adapter {};
++    std::shared_ptr<lvdd_export::hub> capture {std::make_shared<lvdd_export::hub>()};
+     IDDCX_MONITOR monitor {};
+     std::unique_ptr<CursorProcessor> cursor_processor {};
+     std::unique_ptr<SwapChainProcessor> swapchain_processor {};
+@@ -1802,10 +1817,11 @@ namespace {
+ 
+   class SwapChainProcessor {
+   public:
+-    SwapChainProcessor(IDDCX_SWAPCHAIN swapchain, HANDLE next_surface_available):
++    SwapChainProcessor(IDDCX_SWAPCHAIN swapchain, HANDLE next_surface_available, std::shared_ptr<lvdd_export::hub> capture):
+         swapchain_ {swapchain},
+         next_surface_available_ {next_surface_available},
+-        referenced_swapchain_ {reinterpret_cast<WDFOBJECT>(swapchain)} {
++        referenced_swapchain_ {reinterpret_cast<WDFOBJECT>(swapchain)},
++        capture_ {std::move(capture)} {
+       if (referenced_swapchain_) {
+         WdfObjectReference(referenced_swapchain_);
+       }
+@@ -2089,6 +2105,7 @@ namespace {
+ 
+     void process_frames(const LUID render_adapter_luid) {
+       MmcssRegistration mmcss {kSwapchainMmcssTask};
++      lvdd_export::producer capture {capture_};
+ 
+       HRESULT hr = reset_render_device(render_adapter_luid);
+       if (FAILED(hr)) {
+@@ -2130,6 +2147,7 @@ namespace {
+ 
+         for (;;) {
+           IDXGIResource *surface_ptr = nullptr;
++          IDDCX_METADATA2 metadata {};
+           HRESULT acquire_result = E_FAIL;
+           if (IDD_IS_FUNCTION_AVAILABLE(IddCxSwapChainReleaseAndAcquireBuffer2)) {
+             IDARG_IN_RELEASEANDACQUIREBUFFER2 input {};
+@@ -2138,6 +2156,7 @@ namespace {
+             acquired.MetaData.Size = sizeof(acquired.MetaData);
+             acquire_result = IddCxSwapChainReleaseAndAcquireBuffer2(swapchain_, &input, &acquired);
+             surface_ptr = acquired.MetaData.pSurface;
++            metadata = acquired.MetaData;
+           } else {
+             IDARG_OUT_RELEASEANDACQUIREBUFFER acquired {};
+             acquire_result = IddCxSwapChainReleaseAndAcquireBuffer(swapchain_, &acquired);
+@@ -2185,6 +2204,9 @@ namespace {
+ 
+           Microsoft::WRL::ComPtr<IDXGIResource> surface;
+           surface.Attach(surface_ptr);
++          if (metadata.Size && surface) {
++            capture.publish(device_.Get(), surface.Get(), metadata, render_adapter_luid);
++          }
+           // Drop the acquired surface before reporting the frame complete so
+           // IddCx can reclaim the buffer during unassign/departure.
+           surface.Reset();
+@@ -2240,6 +2262,7 @@ namespace {
+     WDFOBJECT referenced_swapchain_ {};
+     Microsoft::WRL::ComPtr<ID3D11Device> device_;
+     Microsoft::WRL::ComPtr<IDXGIDevice> dxgi_device_;
++    std::shared_ptr<lvdd_export::hub> capture_;
+   };
+ 
+   enum class DeferredSwapChainCleanup {
+@@ -3466,6 +3489,8 @@ namespace {
+           return {vdd::BackendError::Failed, {}, 0};
+         }
+         monitor->second.arriving = false;
++        monitor->second.capture_target_id = arrival_out.OsTargetId;
++        monitor->second.capture_adapter = arrival_out.OsAdapterLuid;
+       }
+ 
+       TraceLoggingWrite(
+@@ -3764,6 +3789,39 @@ namespace {
+     }
+ 
+   public:
++    /** @brief Attach only through the existing SYSTEM/broker-only control interface. */
++    NTSTATUS attach_capture(WDFREQUEST request, const lvdd_capture::request &input, lvdd_capture::reply &output) {
++      if (!lvdd_capture::valid(input)) return STATUS_INVALID_PARAMETER;
++      auto file = WdfRequestGetFileObject(request);
++      if (!file) return STATUS_INVALID_HANDLE;
++      auto *context = GetCaptureFileContext(file);
++      if (!context->capture) {
++        std::shared_ptr<lvdd_export::hub> selected;
++        {
++          std::lock_guard guard(mutex_);
++          for (auto &[id, record] : monitors_) {
++            if (record.capture_target_id == input.target_id && record.capture_adapter.LowPart == input.adapter_low &&
++                record.capture_adapter.HighPart == input.adapter_high && !record.arriving && !record.departing) {
++              selected = record.capture; break;
++            }
++          }
++        }
++        if (!selected) return STATUS_NOT_FOUND;
++        context->capture = new (std::nothrow) lvdd_export::binding(std::move(selected), input.target_id);
++        if (!context->capture) return STATUS_INSUFFICIENT_RESOURCES;
++      }
++      auto &binding = *context->capture;
++      if (binding.target != input.target_id) return STATUS_INVALID_PARAMETER;
++      if (!binding.pinned) {
++        std::lock_guard guard(binding.source->mutex);
++        if (binding.source->current && binding.source->current->data->state == 1)
++          binding.pinned = binding.source->current;
++      }
++      if (!binding.pinned || !binding.pinned->data || binding.pinned->data->state != 1) return STATUS_DEVICE_NOT_READY;
++      output = binding.pinned->describe();
++      return STATUS_SUCCESS;
++    }
++
+     NTSTATUS assign_swapchain(IDDCX_MONITOR monitor, const IDARG_IN_SETSWAPCHAIN *args) {
+       // IddCx bugchecks the driver if EvtIddCxMonitorAssignSwapChain returns any
+       // status other than STATUS_SUCCESS or STATUS_GRAPHICS_INDIRECT_DISPLAY_ABANDON_SWAPCHAIN.
+@@ -3778,6 +3836,7 @@ namespace {
+         return STATUS_GRAPHICS_INDIRECT_DISPLAY_ABANDON_SWAPCHAIN;
+       }
+ 
++      std::shared_ptr<lvdd_export::hub> capture;
+       {
+         std::lock_guard lock {mutex_};
+         const auto record = find_current_monitor_locked(context->display_id, monitor);
+@@ -3787,12 +3846,13 @@ namespace {
+           return STATUS_GRAPHICS_INDIRECT_DISPLAY_ABANDON_SWAPCHAIN;
+         }
+         ++record->second.assign_callbacks_in_flight;
++        capture = record->second.capture;
+       }
+       AssignCallbackScope assign_scope {*this, context->display_id, monitor};
+ 
+       std::unique_ptr<SwapChainProcessor> processor;
+       try {
+-        processor = std::make_unique<SwapChainProcessor>(args->hSwapChain, args->hNextSurfaceAvailable);
++        processor = std::make_unique<SwapChainProcessor>(args->hSwapChain, args->hNextSurfaceAvailable, std::move(capture));
+       } catch (...) {
+         return STATUS_GRAPHICS_INDIRECT_DISPLAY_ABANDON_SWAPCHAIN;
+       }
+@@ -4423,6 +4483,13 @@ NTSTATUS SunshineEvtDeviceAdd(WDFDRIVER driver, PWDFDEVICE_INIT device_init) {
+   WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&device_attributes, DeviceContext);
+   device_attributes.EvtCleanupCallback = cleanup_device_context;
+ 
++  WDF_FILEOBJECT_CONFIG file_config;
++  WDF_FILEOBJECT_CONFIG_INIT(&file_config, WDF_NO_EVENT_CALLBACK, WDF_NO_EVENT_CALLBACK, WDF_NO_EVENT_CALLBACK);
++  WDF_OBJECT_ATTRIBUTES file_attributes;
++  WDF_OBJECT_ATTRIBUTES_INIT_CONTEXT_TYPE(&file_attributes, CaptureFileContext);
++  file_attributes.EvtCleanupCallback = cleanup_capture_file;
++  WdfDeviceInitSetFileObjectConfig(device_init, &file_config, &file_attributes);
++
+   WDFDEVICE device = nullptr;
+   status = WdfDeviceCreate(&device_init, &device_attributes, &device);
+   if (!NT_SUCCESS(status)) {
+@@ -4663,6 +4730,23 @@ void SunshineEvtIddCxDeviceIoControl(
+     return;
+   }
+ 
++  if (io_control_code == lvdd_capture::attach_ioctl) {
++    if (input_buffer_length != sizeof(lvdd_capture::request) || output_buffer_length < sizeof(lvdd_capture::reply)) {
++      WdfRequestComplete(request, STATUS_INVALID_PARAMETER);
++      return;
++    }
++    const auto input_copy = *static_cast<const lvdd_capture::request *>(input);
++    lvdd_capture::reply response;
++    try {
++      status = context->state->backend.attach_capture(request, input_copy, response);
++    } catch (...) {
++      status = STATUS_INSUFFICIENT_RESOURCES;
++    }
++    if (NT_SUCCESS(status)) memcpy(output, &response, sizeof(response));
++    WdfRequestCompleteWithInformation(request, status, NT_SUCCESS(status) ? sizeof(response) : 0);
++    return;
++  }
++
+   const auto result = context->state->dispatch(
+     io_control_code,
+     input,
+diff --git a/tests/unit/test_capture_protocol.cpp b/tests/unit/test_capture_protocol.cpp
+new file mode 100644
+index 0000000..028ee8b
+--- /dev/null
++++ b/tests/unit/test_capture_protocol.cpp
+@@ -0,0 +1,40 @@
++/** @file tests/unit/test_lvdd_capture.cpp
++ * @brief Wire-contract and newest-frame policy tests, independent of driver availability.
++ */
++#include "../../src/driver/windows_driver/capture_protocol.h"
++
++#include <gtest/gtest.h>
++#include <limits>
++
++TEST(LvddCapture, RejectsIncompatibleRequests) {
++  lvdd_capture::request r;
++  EXPECT_TRUE(lvdd_capture::valid(r));
++  ++r.protocol;
++  EXPECT_FALSE(lvdd_capture::valid(r));
++  r = {};
++  --r.size;
++  EXPECT_FALSE(lvdd_capture::valid(r));
++  r = {};
++  r.reserved = 1;
++  EXPECT_FALSE(lvdd_capture::valid(r));
++}
++
++TEST(LvddCapture, PicksNewestNotNextFifoSlot) {
++  lvdd_capture::frame entries[lvdd_capture::slots] {};
++  EXPECT_EQ(lvdd_capture::latest(entries), 0u);
++  entries[2].sequence = 10;
++  EXPECT_EQ(lvdd_capture::latest(entries), 2u);
++  entries[0].sequence = 12;
++  EXPECT_EQ(lvdd_capture::latest(entries), 0u);
++  entries[1].sequence = 11;
++  EXPECT_EQ(lvdd_capture::latest(entries), 0u);
++  entries[2].sequence = std::numeric_limits<std::uint64_t>::max();
++  EXPECT_EQ(lvdd_capture::latest(entries), 2u);
++}
++
++TEST(LvddCapture, MetadataContainsNoPixelBufferOrProcessPointers) {
++  EXPECT_EQ(sizeof(lvdd_capture::shared), 128u);
++  EXPECT_EQ(sizeof(lvdd_capture::reply), 64u);
++  EXPECT_EQ(lvdd_capture::attach_ioctl & 3, 0u);
++  EXPECT_EQ((lvdd_capture::attach_ioctl >> 14) & 3, 3u);
++}
+-- 
+2.35.0.windows.1
+

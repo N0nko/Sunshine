@@ -1908,6 +1908,53 @@ namespace platf::dxgi {
     return 0;
   }
 
+  int display_lvdd_vram_t::init(const ::video::config_t &config, const std::string &display_name) {
+    if (display_base_t::init(config, display_name)) {
+      return -1;
+    }
+    DXGI_OUTPUT_DESC desc {};
+    if (FAILED(output->GetDesc(&desc))) {
+      return -1;
+    }
+    return source.init(this, utf_utils::to_utf8(desc.DeviceName));
+  }
+
+  capture_e display_lvdd_vram_t::snapshot(const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &out, std::chrono::milliseconds timeout, bool cursor_visible) {
+    // This driver intentionally uses OS-composited cursors, including in exported surfaces.
+    texture2d_t texture;
+    uint64_t qpc = 0;
+    const auto result = source.next_frame(timeout, &texture, qpc);
+    if (result != capture_e::ok) {
+      return result;
+    }
+    auto release = util::fail_guard([this]() {
+      source.release_frame();
+    });
+    std::shared_ptr<platf::img_t> img;
+    if (!pull(img)) {
+      return capture_e::interrupted;
+    }
+    auto gpu = std::static_pointer_cast<img_d3d_t>(img);
+    if (complete_img(gpu.get(), false)) {
+      return capture_e::error;
+    }
+    {
+      texture_lock_helper lock(gpu->capture_mutex.get());
+      if (!lock.lock()) {
+        return capture_e::error;
+      }
+      device_ctx->CopyResource(gpu->capture_texture.get(), texture.get());
+    }
+    gpu->blank = false;
+    img->frame_timestamp = std::chrono::steady_clock::now() - qpc_time_difference(qpc_counter(), qpc);
+    out = std::move(img);
+    return capture_e::ok;
+  }
+
+  capture_e display_lvdd_vram_t::release_snapshot() {
+    return source.release_frame();
+  }
+
   std::shared_ptr<platf::img_t> display_vram_t::alloc_img() {
     auto img = std::make_shared<img_d3d_t>();
 

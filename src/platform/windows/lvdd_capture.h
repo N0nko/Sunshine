@@ -22,6 +22,8 @@ namespace platf::dxgi {
     ~lvdd_capture_t();
     /** @brief Avoid repeatedly reopening a failed producer during capture recovery. */
     static bool available();
+    /** @brief Switch to DXGI for a requirement the direct surface cannot satisfy. */
+    static capture_e fallback();
     /** @brief Attach the exact display target, validate color space and import GPU surfaces. */
     int init(display_base_t *display, const std::string &name);
     /** @brief Acquire newest available texture, bounded by the caller's timeout. */

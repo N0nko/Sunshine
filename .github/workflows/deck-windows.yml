@@ -10,6 +10,7 @@ on:
       - deck/rebase-2026.906
       - deck/capture-audio-20260911
       - deck/direct-capture-20260912
+      - deck/direct-capture-final-20260912
 
 permissions:
   contents: read

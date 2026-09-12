@@ -150,6 +150,10 @@ namespace platf::dxgi {
     return std::chrono::steady_clock::now().time_since_epoch().count() >= retry_after.load();
   }
 
+  capture_e lvdd_capture_t::fallback() {
+    return lost();
+  }
+
   int lvdd_capture_t::init(display_base_t *display, const std::string &name) {
     auto failure = util::fail_guard([]() {
       lost();
@@ -234,17 +238,27 @@ namespace platf::dxgi {
         ReleaseMutex(s.lock.value);
         return lost();
       }
+      if (lock_result == WAIT_FAILED) {
+        return lost();
+      }
       if (lock_result == WAIT_OBJECT_0) {
         const unsigned latest = lvdd_capture::latest(s.metadata->frames);
         const auto frame = s.metadata->frames[latest];
-        if (frame.sequence > s.last_sequence && s.keyed[latest]->AcquireSync(0, 0) == S_OK) {
+        const HRESULT acquired = frame.sequence > s.last_sequence ? s.keyed[latest]->AcquireSync(0, 0) : WAIT_TIMEOUT;
+        if (acquired != S_OK && acquired != WAIT_TIMEOUT) {
+          ReleaseMutex(s.lock.value);
+          return lost();
+        }
+        if (acquired == S_OK) {
           s.held = latest;
           if (s.last_sequence) {
             s.skipped += frame.sequence - s.last_sequence - 1;
           }
           s.last_sequence = frame.sequence;
           ++s.selected;
-          qpc = frame.present_qpc ? frame.present_qpc : frame.acquire_qpc;
+          // IddCx's PresentDisplayQPCTime is a scheduled display deadline, not
+          // evidence of when pixels became available. Use the producer handoff time.
+          qpc = frame.acquire_qpc;
           s.images[latest].CopyTo(out);
           ReleaseMutex(s.lock.value);
           return capture_e::ok;
@@ -267,6 +281,6 @@ namespace platf::dxgi {
   }
 
   capture_e lvdd_capture_t::release_frame() {
-    return state->release();
+    return state->release() == capture_e::ok ? capture_e::ok : lost();
   }
 }  // namespace platf::dxgi

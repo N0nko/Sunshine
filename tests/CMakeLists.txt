@@ -29,6 +29,7 @@ add_executable(test_deck_extensions
         ${CMAKE_SOURCE_DIR}/tests/unit/test_deck_protocol.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_warm_resume.cpp
         ${CMAKE_SOURCE_DIR}/tests/unit/test_packet_pacing.cpp
+        ${CMAKE_SOURCE_DIR}/tests/unit/test_lvdd_capture.cpp
         ${CMAKE_SOURCE_DIR}/src/warm_resume.cpp)
 target_link_libraries(test_deck_extensions PRIVATE gtest_main)
 add_test(NAME deck_extensions COMMAND test_deck_extensions)

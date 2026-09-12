@@ -1921,6 +1921,10 @@ namespace platf::dxgi {
 
   capture_e display_lvdd_vram_t::snapshot(const pull_free_image_cb_t &pull, std::shared_ptr<platf::img_t> &out, std::chrono::milliseconds timeout, bool cursor_visible) {
     // This driver intentionally uses OS-composited cursors, including in exported surfaces.
+    if (!cursor_visible) {
+      BOOST_LOG(info) << "LVDD direct capture: cursor suppression requested; switching to DXGI";
+      return lvdd_capture_t::fallback();
+    }
     texture2d_t texture;
     uint64_t qpc = 0;
     const auto result = source.next_frame(timeout, &texture, qpc);

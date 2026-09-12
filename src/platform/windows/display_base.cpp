@@ -1123,7 +1123,7 @@ namespace platf {
           << std::endl;
 
         // Don't include the display in the list if we can't actually capture it
-        if (desc.AttachedToDesktop && dxgi::test_dxgi_duplication(adapter, output, true)) {
+        if (desc.AttachedToDesktop && (config::video.capture == "lvdd" || dxgi::test_dxgi_duplication(adapter, output, true))) {
           display_names.emplace_back(std::move(device_name));
         }
       }

@@ -11,6 +11,7 @@ on:
       - deck/capture-audio-20260911
       - deck/direct-capture-20260912
       - deck/direct-capture-final-20260912
+      - deck/rebase-stable-20261009
 
 permissions:
   contents: read
@@ -94,7 +95,7 @@ jobs:
       - name: Build Sunshine
         env:
           BRANCH: ${{ github.ref_name }}
-          BUILD_VERSION: '2026.906.222525'
+          BUILD_VERSION: '2026.914.233613'
           COMMIT: ${{ github.sha }}
         run: |
           export PATH="$PATH:$(cygpath "$NODEJS_PATH")"
@@ -119,14 +120,14 @@ jobs:
       - name: Test input lifecycle and security regressions
         id: input-tests
         working-directory: cmake-build-deck/tests
-        run: ./test_sunshine.exe --gtest_filter='Input*:*Pairing*:*Crypto*:*Config*:*Nvenc*' --gtest_color=yes
+        run: ./test_sunshine.exe --gtest_filter='Input*:*Pairing*:*Crypto*:*Config*:*Nvenc*:ThreadSafe*:*VirtualHid*:*BindAddress*:*Mdns*' --gtest_color=yes
 
       - name: Diagnose test shutdown failure
         if: failure() && steps.input-tests.outcome == 'failure'
         working-directory: cmake-build-deck/tests
         run: >-
           gdb --batch -ex 'set pagination off' -ex run -ex 'thread apply all bt 20'
-          --args ./test_sunshine.exe --gtest_filter='Input*:*Pairing*:*Crypto*:*Config*:*Nvenc*'
+          --args ./test_sunshine.exe --gtest_filter='Input*:*Pairing*:*Crypto*:*Config*:*Nvenc*:ThreadSafe*:*VirtualHid*:*BindAddress*:*Mdns*'
           --gtest_color=no
 
       - name: Check packaged runtime linkage

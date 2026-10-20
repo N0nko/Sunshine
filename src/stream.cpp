@@ -41,6 +41,7 @@ extern "C" {
 #include "process.h"
 #include "remote_display.h"
 #include "stream.h"
+#include "stream_ping.h"
 #include "sync.h"
 #include "system_tray.h"
 #include "thread_safe.h"
@@ -507,6 +508,7 @@ namespace stream {
 
     std::shared_ptr<input::input_t> input;  ///< Platform input device state for this stream.
 
+    startup_ping_queues_t<std::pair<udp::endpoint, std::string>> startup_pings;  ///< Cancellable initial UDP handshakes.
     std::jthread audioThread;  ///< Audio thread.
     std::jthread videoThread;  ///< Video thread.
 
@@ -1793,6 +1795,7 @@ namespace stream {
       }
 
       session->shutdown_event->raise(true);
+      session->startup_pings.stop();
       session->controlEnd.raise(true);
     }
 
@@ -2477,7 +2480,10 @@ namespace stream {
    * @return Network operation status.
    */
   int recv_ping(session_t *session, decltype(broadcast)::ptr_t ref, socket_e type, std::string_view expected_payload, udp::endpoint &peer, std::chrono::milliseconds timeout) {
-    auto messages = std::make_shared<message_queue_t::element_type>(30);
+    auto messages = type == socket_e::video ? session->startup_pings.video : session->startup_pings.audio;
+    if (session->shutdown_event->peek()) {
+      return -1;
+    }
     av_session_id_t session_id = std::string {expected_payload};
 
     // Only allow matches on the peer address for legacy clients
@@ -2499,11 +2505,11 @@ namespace stream {
     auto start_time = std::chrono::steady_clock::now();
     auto current_time = start_time;
 
-    while (current_time - start_time < config::stream.ping_timeout) {
+    while (!session->shutdown_event->peek() && current_time - start_time < timeout) {
       auto delta_time = current_time - start_time;
 
-      auto msg_opt = messages->pop(config::stream.ping_timeout - delta_time);
-      if (!msg_opt) {
+      auto msg_opt = messages->pop(timeout - delta_time);
+      if (!msg_opt || session->shutdown_event->peek()) {
         break;
       }
 
@@ -2525,7 +2531,9 @@ namespace stream {
       return 0;
     }
 
-    BOOST_LOG(error) << "Initial Ping Timeout"sv;
+    if (!session->shutdown_event->peek()) {
+      BOOST_LOG(error) << "Initial Ping Timeout"sv;
+    }
     return -1;
   }
 
@@ -2612,6 +2620,7 @@ namespace stream {
       }
 
       session.shutdown_event->raise(true);
+      session.startup_pings.stop();
     }
 
     /**

@@ -12,6 +12,7 @@ on:
       - deck/direct-capture-20260912
       - deck/direct-capture-final-20260912
       - deck/rebase-stable-20261009
+      - deck/input-startup-20261020
 
 permissions:
   contents: read

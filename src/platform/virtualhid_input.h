@@ -5,6 +5,7 @@
 #pragma once
 
 // standard includes
+#include <functional>
 #include <memory>
 #include <optional>
 #include <set>
@@ -127,6 +128,19 @@ namespace platf::virtualhid {
     const lvh::BackendCapabilities &capabilities,
     std::string_view gamepad_driver,
     bool virtualhid_licensed
+  );
+
+  /**
+   * @brief Select a gamepad backend without querying an unused driver service.
+   * @param capabilities Available runtime features.
+   * @param gamepad_driver Configured driver preference.
+   * @param query_license Called only when an available, selected backend requires a license.
+   * @return True when the runtime can provide the selected gamepad.
+   */
+  bool select_gamepad_runtime(
+    const lvh::BackendCapabilities &capabilities,
+    std::string_view gamepad_driver,
+    const std::function<bool()> &query_license
   );
 
   /**

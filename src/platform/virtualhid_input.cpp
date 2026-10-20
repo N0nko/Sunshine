@@ -586,6 +586,17 @@ namespace platf::virtualhid {
            (!capabilities.requires_installed_driver || virtualhid_licensed);
   }
 
+  bool select_gamepad_runtime(
+    const lvh::BackendCapabilities &capabilities,
+    const std::string_view gamepad_driver,
+    const std::function<bool()> &query_license
+  ) {
+    // The Windows broker may wait five seconds when its optional service is
+    // absent. Never put that wait on the input worker for an unusable driver.
+    return should_use_gamepad_runtime(capabilities, gamepad_driver, true) &&
+           (!capabilities.requires_installed_driver || query_license());
+  }
+
   bool should_try_vigembus_fallback(
     const std::string_view configured_gamepad,
     const bool virtualhid_selected,
